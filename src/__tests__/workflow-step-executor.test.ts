@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { createJsonlLogger } from '../executor/jsonl-logger';
 import { createWorkflowExecutor } from '../executor/create-workflow-executor';
 import { WorkflowExecutorModeEnum, WorkflowNodeStatusEnum } from '../types';
 import { createAdapters, createCodeNode, createConnection, createMetadataNode, createStartNode, createWorkflow } from './fixtures';
@@ -19,16 +18,10 @@ describe('shared workflow step executor', () => {
                 code: async () => ({ output: { ok: true }, status: WorkflowNodeStatusEnum.Passed, logs: ['step ok'] })
             })
         });
-        const logger = createJsonlLogger();
-        const result = await executor.executeNodeStep({
-            workflow,
-            nodeId: code.id,
-            settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' },
-            logger
-        });
 
+        const result = await executor.executeNodeStep({ workflow, nodeId: code.id, settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
         expect(result.node.status).toBe(WorkflowNodeStatusEnum.Passed);
-        expect(result.node.output).toEqual({ ok: true });
+        expect(result.node.ports.out.output).toEqual({ ok: true });
         const untouched = result.workflow.nodes.find((item) => item.id === metadata.id);
         expect(untouched?.status).toBe(WorkflowNodeStatusEnum.Stopped);
     });

@@ -23,8 +23,7 @@ __export(types_exports, {
   WorkflowExecutorModeEnum: () => WorkflowExecutorModeEnum,
   WorkflowLogLevelEnum: () => WorkflowLogLevelEnum,
   WorkflowNodeKindEnum: () => WorkflowNodeKindEnum,
-  WorkflowNodeStatusEnum: () => WorkflowNodeStatusEnum,
-  WorkflowViewerTypeEnum: () => WorkflowViewerTypeEnum
+  WorkflowNodeStatusEnum: () => WorkflowNodeStatusEnum
 });
 module.exports = __toCommonJS(types_exports);
 var WorkflowNodeStatusEnum = /* @__PURE__ */ ((WorkflowNodeStatusEnum2) => {
@@ -41,13 +40,6 @@ var WorkflowNodeKindEnum = /* @__PURE__ */ ((WorkflowNodeKindEnum2) => {
   WorkflowNodeKindEnum2["Error"] = "error";
   return WorkflowNodeKindEnum2;
 })(WorkflowNodeKindEnum || {});
-var WorkflowViewerTypeEnum = /* @__PURE__ */ ((WorkflowViewerTypeEnum2) => {
-  WorkflowViewerTypeEnum2["Json"] = "json";
-  WorkflowViewerTypeEnum2["Markdown"] = "markdown";
-  WorkflowViewerTypeEnum2["Raw"] = "raw";
-  WorkflowViewerTypeEnum2["Table"] = "table";
-  return WorkflowViewerTypeEnum2;
-})(WorkflowViewerTypeEnum || {});
 var WorkflowLogLevelEnum = /* @__PURE__ */ ((WorkflowLogLevelEnum2) => {
   WorkflowLogLevelEnum2["Info"] = "info";
   WorkflowLogLevelEnum2["Warn"] = "warn";
@@ -64,6 +56,5 @@ var WorkflowExecutorModeEnum = /* @__PURE__ */ ((WorkflowExecutorModeEnum2) => {
   WorkflowExecutorModeEnum,
   WorkflowLogLevelEnum,
   WorkflowNodeKindEnum,
-  WorkflowNodeStatusEnum,
-  WorkflowViewerTypeEnum
+  WorkflowNodeStatusEnum
 });

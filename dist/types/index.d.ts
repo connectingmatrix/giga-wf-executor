@@ -10,12 +10,6 @@ declare enum WorkflowNodeKindEnum {
     Output = "output",
     Error = "error"
 }
-declare enum WorkflowViewerTypeEnum {
-    Json = "json",
-    Markdown = "markdown",
-    Raw = "raw",
-    Table = "table"
-}
 declare enum WorkflowLogLevelEnum {
     Info = "info",
     Warn = "warn",
@@ -27,7 +21,6 @@ declare enum WorkflowExecutorModeEnum {
 }
 type WorkflowNodeStatus = `${WorkflowNodeStatusEnum}`;
 type WorkflowNodeKind = `${WorkflowNodeKindEnum}`;
-type WorkflowViewerType = `${WorkflowViewerTypeEnum}`;
 type WorkflowLogLevel = `${WorkflowLogLevelEnum}`;
 type WorkflowExecutorMode = `${WorkflowExecutorModeEnum}`;
 interface WorkflowRunLogEvent {
@@ -46,13 +39,9 @@ interface WorkflowRuntimeSettings {
     authMode: string;
     manualHeaders?: Record<string, string>;
 }
-interface WorkflowNodeSchema {
-    id: string;
-    outputViewers?: Array<{
-        id: string;
-        label: string;
-        type: WorkflowViewerType;
-    }>;
+interface WorkflowNodePorts {
+    in: Record<string, Record<string, unknown>>;
+    out: Record<string, unknown>;
 }
 interface WorkflowNodeModel {
     id: string;
@@ -67,22 +56,8 @@ interface WorkflowNodeModel {
         x: number;
         y: number;
     };
-    input: Record<string, unknown>;
-    output: unknown;
-    properties?: Record<string, unknown>;
-    inspector?: {
-        title?: string;
-        input?: Record<string, unknown>;
-        properties?: Record<string, unknown>;
-        code?: string;
-        markdown?: string;
-        viewers: Array<{
-            id: string;
-            label: string;
-            type: WorkflowViewerType;
-            value: unknown;
-        }>;
-    };
+    runtime: Record<string, unknown>;
+    ports: WorkflowNodePorts;
 }
 interface WorkflowConnectionModel {
     id: string;
@@ -99,26 +74,24 @@ interface WorkflowMetadata {
     createdAt?: string;
     runtime?: {
         settings?: WorkflowRuntimeSettings;
-        sessionLogs?: WorkflowRunLogEvent[];
     };
     [key: string]: unknown;
 }
 interface WorkflowDefinition {
     metadata: WorkflowMetadata;
-    nodeModels: Record<string, WorkflowNodeSchema>;
     nodes: WorkflowNodeModel[];
     connections: WorkflowConnectionModel[];
 }
 interface WorkflowInvokeConnectedNodeArgs {
     nodeId: string;
-    input?: Record<string, unknown>;
+    input?: Record<string, Record<string, unknown>>;
     overrides?: WorkflowStepOverrides;
 }
 interface WorkflowNodeHandlerContext {
     node: WorkflowNodeModel;
     workflow: WorkflowDefinition;
     settings: WorkflowRuntimeSettings;
-    input: Record<string, unknown>;
+    input: Record<string, Record<string, unknown>>;
     signal?: AbortSignal;
     hostContext?: unknown;
     invokeConnectedNode?: (args: WorkflowInvokeConnectedNodeArgs) => Promise<{
@@ -133,6 +106,7 @@ interface WorkflowNodeHandlerResult {
 }
 type WorkflowNodeHandler = (context: WorkflowNodeHandlerContext) => Promise<WorkflowNodeHandlerResult>;
 interface WorkflowStepOverrides {
+    runtime?: Record<string, unknown>;
     properties?: Record<string, unknown>;
     code?: string;
     markdown?: string;
@@ -145,16 +119,14 @@ interface WorkflowExecutorRemoteNodeResult {
     workflow: WorkflowDefinition;
     node: WorkflowNodeModel;
     result: WorkflowNodeHandlerResult;
-    logs?: WorkflowRunLogEvent[];
+    events?: WorkflowRunLogEvent[];
 }
 interface WorkflowExecutorAdapters {
     getNodeHandler: (modelId: string | undefined) => WorkflowNodeHandler;
-    resolveNodeSchema: (modelId: string | undefined, nodeModels: Record<string, WorkflowNodeSchema>) => WorkflowNodeSchema;
 }
 interface ExecuteWorkflowOptions {
     signal?: AbortSignal;
     settings: WorkflowRuntimeSettings;
-    logger: WorkflowLogger;
     hostContext?: unknown;
     isNodeLocalCapable?: (modelId: string | undefined) => boolean;
     executeNodeRemotely?: (payload: {
@@ -166,27 +138,29 @@ interface ExecuteWorkflowOptions {
     }) => Promise<WorkflowExecutorRemoteNodeResult>;
     onNodeStart?: (nodeId: string) => void;
     onNodeFinish?: (node: WorkflowNodeModel) => void;
+    onEvent?: (event: WorkflowRunLogEvent) => void;
 }
 interface ExecuteNodeStepOptions {
     workflow: WorkflowDefinition;
     nodeId: string;
     settings: WorkflowRuntimeSettings;
-    logger: WorkflowLogger;
     signal?: AbortSignal;
     hostContext?: unknown;
     overrides?: WorkflowStepOverrides;
     isNodeLocalCapable?: (modelId: string | undefined) => boolean;
     executeNodeRemotely?: ExecuteWorkflowOptions['executeNodeRemotely'];
+    onEvent?: (event: WorkflowRunLogEvent) => void;
 }
 interface WorkflowExecutorResult {
     workflow: WorkflowDefinition;
-    logs: WorkflowRunLogEvent[];
     stopped: boolean;
+    events: WorkflowRunLogEvent[];
 }
 interface WorkflowStepExecutorResult {
     workflow: WorkflowDefinition;
     node: WorkflowNodeModel;
     result: WorkflowNodeHandlerResult;
+    events: WorkflowRunLogEvent[];
 }
 interface WorkflowExecutor {
     mode: WorkflowExecutorMode;
@@ -194,4 +168,4 @@ interface WorkflowExecutor {
     executeNodeStep: (options: ExecuteNodeStepOptions) => Promise<WorkflowStepExecutorResult>;
 }
 
-export { type ExecuteNodeStepOptions, type ExecuteWorkflowOptions, type WorkflowConnectionModel, type WorkflowDefinition, type WorkflowExecutor, type WorkflowExecutorAdapters, type WorkflowExecutorMode, WorkflowExecutorModeEnum, type WorkflowExecutorRemoteNodeResult, type WorkflowExecutorResult, type WorkflowInvokeConnectedNodeArgs, type WorkflowLogLevel, WorkflowLogLevelEnum, type WorkflowLogger, type WorkflowMetadata, type WorkflowNodeHandler, type WorkflowNodeHandlerContext, type WorkflowNodeHandlerResult, type WorkflowNodeKind, WorkflowNodeKindEnum, type WorkflowNodeModel, type WorkflowNodeSchema, type WorkflowNodeStatus, WorkflowNodeStatusEnum, type WorkflowRunLogEvent, type WorkflowRuntimeSettings, type WorkflowStepExecutorResult, type WorkflowStepOverrides, type WorkflowViewerType, WorkflowViewerTypeEnum };
+export { type ExecuteNodeStepOptions, type ExecuteWorkflowOptions, type WorkflowConnectionModel, type WorkflowDefinition, type WorkflowExecutor, type WorkflowExecutorAdapters, type WorkflowExecutorMode, WorkflowExecutorModeEnum, type WorkflowExecutorRemoteNodeResult, type WorkflowExecutorResult, type WorkflowInvokeConnectedNodeArgs, type WorkflowLogLevel, WorkflowLogLevelEnum, type WorkflowLogger, type WorkflowMetadata, type WorkflowNodeHandler, type WorkflowNodeHandlerContext, type WorkflowNodeHandlerResult, type WorkflowNodeKind, WorkflowNodeKindEnum, type WorkflowNodeModel, type WorkflowNodePorts, type WorkflowNodeStatus, WorkflowNodeStatusEnum, type WorkflowRunLogEvent, type WorkflowRuntimeSettings, type WorkflowStepExecutorResult, type WorkflowStepOverrides };

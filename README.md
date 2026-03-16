@@ -8,7 +8,7 @@ Shared workflow execution runtime used by both UI and backend hosts.
 - `executeWorkflow(...)` and `executeNodeStep(...)` through returned executor
 - Shared runtime types (`@workflow/executor/types`)
 - Shared node-core utilities (`@workflow/executor/node-core`)
-- JSONL logger helper
+- JSONL logger helper (optional host utility, not required by executor API)
 
 ## Why this package exists
 
@@ -18,7 +18,7 @@ The workflow executor logic was duplicated across frontend and backend. This pac
 - Branch-aware connection execution
 - node state lifecycle (`running -> passed|failed|stopped`)
 - step execution path
-- JSONL logging utilities
+- event callbacks for out-of-band logging
 - runtime summary generation for `Respond/End` nodes
 
 Node implementations remain host-owned and are injected by adapters.
@@ -40,7 +40,6 @@ const executor = createWorkflowExecutor({
 Adapter contract:
 
 - `getNodeHandler(modelId)` provides node-specific execution.
-- `resolveNodeSchema(modelId, nodeModels)` provides schema used for viewer/state shaping.
 - Optional remote execution bridge is passed at runtime via `executeWorkflow` / `executeNodeStep` options.
 
 ## Execution API
@@ -48,12 +47,12 @@ Adapter contract:
 ```ts
 const result = await executor.executeWorkflow(workflow, {
   settings,
-  logger,
   hostContext, // optional runtime context for host-specific dependencies
   isNodeLocalCapable, // optional local/remote routing per node
   executeNodeRemotely, // optional remote execution fallback
   onNodeStart,
-  onNodeFinish
+  onNodeFinish,
+  onEvent // optional out-of-band lifecycle event sink
 });
 ```
 
@@ -62,9 +61,9 @@ const stepResult = await executor.executeNodeStep({
   workflow,
   nodeId,
   settings,
-  logger,
   hostContext,
-  overrides // properties/code/markdown overrides
+  overrides, // runtime/property/code/markdown overrides
+  onEvent
 });
 ```
 

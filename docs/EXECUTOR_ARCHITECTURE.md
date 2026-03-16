@@ -26,6 +26,8 @@ Key groups:
 
 - Enums for node status, viewer type, log level, executor mode.
 - Core graph types: `WorkflowDefinition`, `WorkflowNodeModel`, `WorkflowConnectionModel`.
+  - `WorkflowDefinition` no longer requires `nodeModels`.
+  - `WorkflowNodeModel` uses `runtime` (flat key/value) and `ports.in`/`ports.out`.
 - Runtime types: `WorkflowRuntimeSettings`, `WorkflowRunLogEvent`.
 - Handler contracts:
   - `WorkflowNodeHandlerContext`
@@ -47,9 +49,8 @@ Functions:
 
 - `buildNodeInputContext(...)`
   - Collects incoming edges to target node.
-  - Reads upstream outputs.
+  - Reads upstream `ports.out` values.
   - Groups values by target input port.
-  - Preserves prior input under `current`.
 
 - `shouldExecuteNodeInCurrentRun(...)`
   - Checks whether at least one inbound connection is active.
@@ -73,12 +74,10 @@ Functions:
 
 - `buildRunningNodeState(...)`
   - Sets status to `running`.
-  - Writes `properties.status` and `properties.timestamp`.
-  - Syncs inspector properties.
+  - Writes `runtime.status` and `runtime.timestamp`.
 
 - `buildCompletedNodeState(...)`
-  - Writes `input`, `output`, final status, properties timestamp.
-  - Updates viewers based on schema.
+  - Writes `ports.in`, `ports.out`, final status and runtime timestamp.
 
 - `buildFailedNodeState(...)`
   - Writes failed status and error output.
@@ -93,12 +92,12 @@ Purpose: Standardized lifecycle event logging.
 Functions:
 
 - `createRunId(prefix)`
-- `logNodeStarted(...)`
-- `logNodeFinished(...)`
-- `logNodeFailed(...)`
-- `logWorkflowStopped(...)`
-- `logWorkflowCompleted(...)`
-- `logWorkflowValidationFailed(...)`
+- `emitNodeStarted(...)`
+- `emitNodeFinished(...)`
+- `emitNodeFailed(...)`
+- `emitWorkflowStopped(...)`
+- `emitWorkflowCompleted(...)`
+- `emitWorkflowValidationFailed(...)`
 
 Conventions:
 
@@ -160,7 +159,7 @@ Major stages:
 3. Execute nodes in DAG order.
 4. Handle local-or-remote execution policy per node.
 5. Support nested connected-node invocation for orchestration nodes.
-6. Emit lifecycle logs and timing metrics.
+6. Emit lifecycle events and timing metrics via `onEvent`.
 7. Inject workflow summary into end node input.
 8. Abort handling with `stopped` transition.
 
@@ -178,7 +177,7 @@ Major stages:
 2. Transition target to running state.
 3. Build input context from upstream outputs.
 4. Execute local or remote.
-5. Persist status/output and lifecycle logs.
+5. Persist status/output and lifecycle events.
 
 ### `src/executor/create-workflow-executor.ts`
 

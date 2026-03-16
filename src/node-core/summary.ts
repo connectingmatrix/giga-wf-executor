@@ -30,7 +30,7 @@ export const buildWorkflowSummaryInput = (
     runId: string,
     outputsByNode: Map<string, unknown>,
     timingsByNode: WorkflowNodeExecutionTimingMap,
-    logs: unknown[]
+    logs: unknown[] = []
 ): Record<string, unknown> => ({
     runId,
     outputsByNode: Object.fromEntries(outputsByNode.entries()),

@@ -12,13 +12,6 @@ export enum WorkflowNodeKindEnum {
     Error = 'error'
 }
 
-export enum WorkflowViewerTypeEnum {
-    Json = 'json',
-    Markdown = 'markdown',
-    Raw = 'raw',
-    Table = 'table'
-}
-
 export enum WorkflowLogLevelEnum {
     Info = 'info',
     Warn = 'warn',
@@ -32,7 +25,6 @@ export enum WorkflowExecutorModeEnum {
 
 export type WorkflowNodeStatus = `${WorkflowNodeStatusEnum}`;
 export type WorkflowNodeKind = `${WorkflowNodeKindEnum}`;
-export type WorkflowViewerType = `${WorkflowViewerTypeEnum}`;
 export type WorkflowLogLevel = `${WorkflowLogLevelEnum}`;
 export type WorkflowExecutorMode = `${WorkflowExecutorModeEnum}`;
 
@@ -54,13 +46,9 @@ export interface WorkflowRuntimeSettings {
     manualHeaders?: Record<string, string>;
 }
 
-export interface WorkflowNodeSchema {
-    id: string;
-    outputViewers?: Array<{
-        id: string;
-        label: string;
-        type: WorkflowViewerType;
-    }>;
+export interface WorkflowNodePorts {
+    in: Record<string, Record<string, unknown>>;
+    out: Record<string, unknown>;
 }
 
 export interface WorkflowNodeModel {
@@ -73,22 +61,8 @@ export interface WorkflowNodeModel {
     kind: WorkflowNodeKind;
     status: WorkflowNodeStatus;
     position: { x: number; y: number };
-    input: Record<string, unknown>;
-    output: unknown;
-    properties?: Record<string, unknown>;
-    inspector?: {
-        title?: string;
-        input?: Record<string, unknown>;
-        properties?: Record<string, unknown>;
-        code?: string;
-        markdown?: string;
-        viewers: Array<{
-            id: string;
-            label: string;
-            type: WorkflowViewerType;
-            value: unknown;
-        }>;
-    };
+    runtime: Record<string, unknown>;
+    ports: WorkflowNodePorts;
 }
 
 export interface WorkflowConnectionModel {
@@ -107,21 +81,19 @@ export interface WorkflowMetadata {
     createdAt?: string;
     runtime?: {
         settings?: WorkflowRuntimeSettings;
-        sessionLogs?: WorkflowRunLogEvent[];
     };
     [key: string]: unknown;
 }
 
 export interface WorkflowDefinition {
     metadata: WorkflowMetadata;
-    nodeModels: Record<string, WorkflowNodeSchema>;
     nodes: WorkflowNodeModel[];
     connections: WorkflowConnectionModel[];
 }
 
 export interface WorkflowInvokeConnectedNodeArgs {
     nodeId: string;
-    input?: Record<string, unknown>;
+    input?: Record<string, Record<string, unknown>>;
     overrides?: WorkflowStepOverrides;
 }
 
@@ -129,7 +101,7 @@ export interface WorkflowNodeHandlerContext {
     node: WorkflowNodeModel;
     workflow: WorkflowDefinition;
     settings: WorkflowRuntimeSettings;
-    input: Record<string, unknown>;
+    input: Record<string, Record<string, unknown>>;
     signal?: AbortSignal;
     hostContext?: unknown;
     invokeConnectedNode?: (args: WorkflowInvokeConnectedNodeArgs) => Promise<{ node: WorkflowNodeModel; result: WorkflowNodeHandlerResult }>;
@@ -144,6 +116,7 @@ export interface WorkflowNodeHandlerResult {
 export type WorkflowNodeHandler = (context: WorkflowNodeHandlerContext) => Promise<WorkflowNodeHandlerResult>;
 
 export interface WorkflowStepOverrides {
+    runtime?: Record<string, unknown>;
     properties?: Record<string, unknown>;
     code?: string;
     markdown?: string;
@@ -158,18 +131,16 @@ export interface WorkflowExecutorRemoteNodeResult {
     workflow: WorkflowDefinition;
     node: WorkflowNodeModel;
     result: WorkflowNodeHandlerResult;
-    logs?: WorkflowRunLogEvent[];
+    events?: WorkflowRunLogEvent[];
 }
 
 export interface WorkflowExecutorAdapters {
     getNodeHandler: (modelId: string | undefined) => WorkflowNodeHandler;
-    resolveNodeSchema: (modelId: string | undefined, nodeModels: Record<string, WorkflowNodeSchema>) => WorkflowNodeSchema;
 }
 
 export interface ExecuteWorkflowOptions {
     signal?: AbortSignal;
     settings: WorkflowRuntimeSettings;
-    logger: WorkflowLogger;
     hostContext?: unknown;
     isNodeLocalCapable?: (modelId: string | undefined) => boolean;
     executeNodeRemotely?: (payload: {
@@ -181,30 +152,32 @@ export interface ExecuteWorkflowOptions {
     }) => Promise<WorkflowExecutorRemoteNodeResult>;
     onNodeStart?: (nodeId: string) => void;
     onNodeFinish?: (node: WorkflowNodeModel) => void;
+    onEvent?: (event: WorkflowRunLogEvent) => void;
 }
 
 export interface ExecuteNodeStepOptions {
     workflow: WorkflowDefinition;
     nodeId: string;
     settings: WorkflowRuntimeSettings;
-    logger: WorkflowLogger;
     signal?: AbortSignal;
     hostContext?: unknown;
     overrides?: WorkflowStepOverrides;
     isNodeLocalCapable?: (modelId: string | undefined) => boolean;
     executeNodeRemotely?: ExecuteWorkflowOptions['executeNodeRemotely'];
+    onEvent?: (event: WorkflowRunLogEvent) => void;
 }
 
 export interface WorkflowExecutorResult {
     workflow: WorkflowDefinition;
-    logs: WorkflowRunLogEvent[];
     stopped: boolean;
+    events: WorkflowRunLogEvent[];
 }
 
 export interface WorkflowStepExecutorResult {
     workflow: WorkflowDefinition;
     node: WorkflowNodeModel;
     result: WorkflowNodeHandlerResult;
+    events: WorkflowRunLogEvent[];
 }
 
 export interface WorkflowExecutor {

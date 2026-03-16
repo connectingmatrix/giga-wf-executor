@@ -1,44 +1,36 @@
-import { WorkflowLogLevelEnum, WorkflowLogger, WorkflowNodeHandlerResult, WorkflowNodeModel, WorkflowNodeStatus, WorkflowNodeStatusEnum } from '../types';
+import { WorkflowLogLevelEnum, WorkflowNodeModel, WorkflowNodeStatusEnum, WorkflowRunLogEvent } from '../types';
 
-const resolveLogLevelFromStatus = (status: WorkflowNodeStatus): `${WorkflowLogLevelEnum}` => {
+export type WorkflowEventSink = (event: Omit<WorkflowRunLogEvent, 'timestamp'>) => void;
+
+export const createRunId = (prefix: string): string => `${prefix}_${Date.now()}`;
+
+const resolveLogLevelFromStatus = (status: WorkflowNodeStatusEnum | string): WorkflowLogLevelEnum => {
     if (status === WorkflowNodeStatusEnum.Failed) return WorkflowLogLevelEnum.Error;
     if (status === WorkflowNodeStatusEnum.Warning || status === WorkflowNodeStatusEnum.Stopped) return WorkflowLogLevelEnum.Warn;
     return WorkflowLogLevelEnum.Info;
 };
 
-export const createRunId = (prefix: 'run' | 'step'): string => `${prefix}_${Date.now()}`;
-
-export const logNodeStarted = (logger: WorkflowLogger, workflowId: string, runId: string, node: WorkflowNodeModel): void => {
-    logger.push({ workflowId, runId, nodeId: node.id, event: 'node.started', level: WorkflowLogLevelEnum.Info, message: `Running ${node.name}` });
+export const emitNodeStarted = (sink: WorkflowEventSink, workflowId: string, runId: string, node: WorkflowNodeModel): void => {
+    sink({ workflowId, runId, nodeId: node.id, event: 'node.started', level: WorkflowLogLevelEnum.Info, message: `Running ${node.name}` });
 };
 
-export const logNodeFinished = (
-    logger: WorkflowLogger,
-    workflowId: string,
-    runId: string,
-    nodeId: string,
-    result: WorkflowNodeHandlerResult,
-    durationMs?: number
-): void => {
-    const status = result.status ?? WorkflowNodeStatusEnum.Passed;
-    logger.push({ workflowId, runId, nodeId, event: 'node.finished', level: resolveLogLevelFromStatus(status), data: { status, durationMs } });
-    (result.logs ?? []).forEach((line) => {
-        logger.push({ workflowId, runId, nodeId, event: 'node.log', level: WorkflowLogLevelEnum.Info, message: line });
-    });
+export const emitNodeFinished = (sink: WorkflowEventSink, workflowId: string, runId: string, nodeId: string, status: string, durationMs: number, logs?: string[]): void => {
+    sink({ workflowId, runId, nodeId, event: 'node.finished', level: resolveLogLevelFromStatus(status), data: { status, durationMs } });
+    (logs ?? []).forEach((line) => sink({ workflowId, runId, nodeId, event: 'node.log', level: WorkflowLogLevelEnum.Info, message: line }));
 };
 
-export const logNodeFailed = (logger: WorkflowLogger, workflowId: string, runId: string, nodeId: string, message: string): void => {
-    logger.push({ workflowId, runId, nodeId, event: 'node.failed', level: WorkflowLogLevelEnum.Error, message });
+export const emitNodeFailed = (sink: WorkflowEventSink, workflowId: string, runId: string, nodeId: string, message: string): void => {
+    sink({ workflowId, runId, nodeId, event: 'node.failed', level: WorkflowLogLevelEnum.Error, message });
 };
 
-export const logWorkflowStopped = (logger: WorkflowLogger, workflowId: string, runId: string): void => {
-    logger.push({ workflowId, runId, event: 'workflow.stopped', level: WorkflowLogLevelEnum.Warn, message: 'Workflow execution was stopped by user.' });
+export const emitWorkflowStopped = (sink: WorkflowEventSink, workflowId: string, runId: string): void => {
+    sink({ workflowId, runId, event: 'workflow.stopped', level: WorkflowLogLevelEnum.Warn, message: 'Workflow execution was stopped by user.' });
 };
 
-export const logWorkflowCompleted = (logger: WorkflowLogger, workflowId: string, runId: string): void => {
-    logger.push({ workflowId, runId, event: 'workflow.completed', level: WorkflowLogLevelEnum.Info });
+export const emitWorkflowCompleted = (sink: WorkflowEventSink, workflowId: string, runId: string): void => {
+    sink({ workflowId, runId, event: 'workflow.completed', level: WorkflowLogLevelEnum.Info });
 };
 
-export const logWorkflowValidationFailed = (logger: WorkflowLogger, workflowId: string, runId: string, message: string): void => {
-    logger.push({ workflowId, runId, event: 'workflow.validation_failed', level: WorkflowLogLevelEnum.Error, message });
+export const emitWorkflowValidationFailed = (sink: WorkflowEventSink, workflowId: string, runId: string, message: string): void => {
+    sink({ workflowId, runId, event: 'workflow.validation_failed', level: WorkflowLogLevelEnum.Error, message });
 };
