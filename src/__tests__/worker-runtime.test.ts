@@ -62,6 +62,39 @@ const createContext = (workflow: WorkflowDefinition): WorkflowNodeHandlerContext
 });
 
 describe('worker runtime compilation and loading', () => {
+    it('normalizes nested TypeScript module shapes and does not crash on missing ES2022 enum path', async () => {
+        const modelId = 'nested-ts-shape';
+        const source = `
+export const validate = async () => ({ ok: true, errors: [], warnings: [] });
+export const init = async () => true;
+export const onUpdate = async () => ({ ok: true });
+export const execute = async () => ({ output: { ok: true }, status: 'passed', logs: ['nested-ts'] });`;
+
+        const transpileModule = (input: string) => ({
+            outputText: input,
+            diagnostics: []
+        });
+
+        const workflow = createWorkflow(modelId, source);
+        const context = createContext(workflow);
+        const handler = createWorkerNodeHandler({
+            modelId,
+            typescriptModuleLoader: async () => ({
+                default: {
+                    default: {
+                        transpileModule,
+                        flattenDiagnosticMessageText: (message: unknown) => String(message),
+                        DiagnosticCategory: { Error: 1 }
+                    }
+                }
+            })
+        });
+        const result = await handler(context);
+
+        expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
+        expect(result.logs).toContain('nested-ts');
+    });
+
     it('compiles TypeScript worker source and executes with @workflow/executor imports', async () => {
         const modelId = 'worker-model';
         const source = `
@@ -99,6 +132,86 @@ export const execute = async (payload: WorkerPayload) => {
         expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
         expect((result.output as Record<string, unknown>).id).toBe('node_1');
         expect(result.logs).toContain('compiled-worker');
+    });
+
+    it('stubs node built-in imports in browser runtime', async () => {
+        const modelId = 'browser-node-builtins';
+        const source = `
+import fs from 'fs';
+
+export const validate = async () => ({ ok: true, errors: [], warnings: [] });
+export const init = async () => true;
+export const onUpdate = async () => ({ ok: true });
+export const execute = async () => ({
+  output: { hasReadFileSync: typeof fs.readFileSync === 'function' },
+  status: 'passed',
+  logs: ['browser-stubbed']
+});`;
+
+        const workflow = createWorkflow(modelId, source);
+        const context = createContext(workflow);
+        const handler = createWorkerNodeHandler({
+            modelId,
+            runtimeEnvironment: 'browser'
+        });
+        const result = await handler(context);
+
+        expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
+        expect((result.output as Record<string, unknown>).hasReadFileSync).toBe(true);
+        expect(result.logs).toContain('browser-stubbed');
+    });
+
+    it('keeps unresolved non-builtin imports as explicit runtime failures in browser mode', async () => {
+        const modelId = 'browser-unresolved-import';
+        const source = `
+import unknownModule from 'not-a-real-runtime-module';
+
+export const validate = async () => ({ ok: true, errors: [], warnings: [] });
+export const init = async () => true;
+export const onUpdate = async () => ({ ok: true });
+export const execute = async () => ({
+  output: { unknownModule },
+  status: 'passed',
+  logs: []
+});`;
+
+        const workflow = createWorkflow(modelId, source);
+        const context = createContext(workflow);
+        const handler = createWorkerNodeHandler({
+            modelId,
+            runtimeEnvironment: 'browser'
+        });
+        const result = await handler(context);
+
+        expect(result.status).toBe(WorkflowNodeStatusEnum.Failed);
+        expect(String((result.output as Record<string, unknown>).error ?? '')).toContain('Unable to load worker module');
+    });
+
+    it('executes node built-in imports normally in node runtime', async () => {
+        const modelId = 'node-builtins';
+        const source = `
+import fs from 'fs';
+
+export const validate = async () => ({ ok: true, errors: [], warnings: [] });
+export const init = async () => true;
+export const onUpdate = async () => ({ ok: true });
+export const execute = async () => ({
+  output: { hasReadFileSync: typeof fs.readFileSync === 'function' },
+  status: 'passed',
+  logs: ['node-builtin']
+});`;
+
+        const workflow = createWorkflow(modelId, source);
+        const context = createContext(workflow);
+        const handler = createWorkerNodeHandler({
+            modelId,
+            runtimeEnvironment: 'node'
+        });
+        const result = await handler(context);
+
+        expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
+        expect((result.output as Record<string, unknown>).hasReadFileSync).toBe(true);
+        expect(result.logs).toContain('node-builtin');
     });
 
     it('fails with explicit diagnostics when worker TypeScript compile fails', async () => {

@@ -23,10 +23,16 @@ export enum WorkflowExecutorModeEnum {
     Server = 'server'
 }
 
+export enum WorkerRuntimeEnvironmentEnum {
+    Browser = 'browser',
+    Node = 'node'
+}
+
 export type WorkflowNodeStatus = `${WorkflowNodeStatusEnum}`;
 export type WorkflowNodeKind = `${WorkflowNodeKindEnum}`;
 export type WorkflowLogLevel = `${WorkflowLogLevelEnum}`;
 export type WorkflowExecutorMode = `${WorkflowExecutorModeEnum}`;
+export type WorkerRuntimeEnvironment = `${WorkerRuntimeEnvironmentEnum}`;
 
 export interface WorkflowRunLogEvent {
     timestamp: string;
@@ -235,6 +241,10 @@ export interface WorkerSelfState {
 
 export interface WorkerPayload {
     workflow: WorkflowDefinition;
+    ENVIRONMENT: WorkerRuntimeEnvironment;
+    EXECUTOR: {
+        environment: WorkerRuntimeEnvironment;
+    };
     NODE_SCOPE: WorkerScope;
     NODE: WorkerNodeFacade;
     self: WorkerSelfState;

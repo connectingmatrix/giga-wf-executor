@@ -255,7 +255,9 @@ Functions:
 - `createWorkerNodeHandler({ modelId, executeHelpers })`
   - decodes worker source from `workflow.NODE_EXECUTORS[modelId]`.
   - validates signature from `workflow.NODE_EXECUTOR_SIGNATURES[modelId]`.
+  - normalizes TypeScript module bootstrap across ESM/CJS/default-wrapped shapes.
   - rewrites `@workflow/execute` imports to runtime virtual helper module.
+  - in browser runtime, rewrites Node built-in imports (`fs`, `node:fs`, etc.) to stub modules.
   - caches compiled sources by `(modelId, signature)` and loads worker module from `data:` URL.
   - enforces required exports (`validate/init/onUpdate/execute`).
   - executes worker contract and normalizes output/status/logs.
@@ -263,6 +265,8 @@ Functions:
 
 Worker payload contract exposed by runtime:
 - `workflow`
+- `ENVIRONMENT` (`browser` or `node`)
+- `EXECUTOR.environment`
 - `NODE_SCOPE`
 - `NODE` (node snapshot, `PORTS`, `PROPERTIES`, `OUTPUT`)
 - `self` (`status`, `PORTS`, `OUTPUT`)

@@ -56,6 +56,14 @@ Runtime behavior:
   - `executeBackend(NODELikePayload)`
   - `updateNode(...)`
   - `toRecord`, `toErrorResult`, `toNode`, `normalizeResult`
+- Worker payload now includes runtime environment hints:
+  - `payload.ENVIRONMENT` (`browser` or `node`)
+  - `payload.EXECUTOR.environment`
+
+Local/browser import behavior:
+- Node built-in imports (for example `fs`, `node:fs`) are rewritten to non-functional stubs in browser mode.
+- Third-party unresolved imports are not stubbed and fail explicitly.
+- Node/server mode keeps real Node built-in import behavior.
 
 ## Mode and adapters
 

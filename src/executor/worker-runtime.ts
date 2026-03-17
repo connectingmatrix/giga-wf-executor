@@ -2,6 +2,8 @@ import {
     WorkerExecuteResult,
     WorkerModuleExports,
     WorkerPayload,
+    WorkerRuntimeEnvironment,
+    WorkerRuntimeEnvironmentEnum,
     WorkerScope,
     WorkerSelfState,
     WorkerUpdateResult,
@@ -26,11 +28,55 @@ interface GlobalWorkerHelpers {
     __WF_EXECUTE_HELPERS__?: Record<string, WorkerExecuteHelpers>;
 }
 
+type TypeScriptModuleLoader = () => Promise<unknown>;
+
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 const globalWorkerHelpers = globalThis as typeof globalThis & GlobalWorkerHelpers;
 const MAX_ON_UPDATE_REENTRY = 6;
 const compiledWorkerSourceBySignature = new Map<string, string>();
+const WORKER_NODE_BUILTIN_STUB_SPECIFIER = '@workflow/node-builtin-stub';
+const NODE_BUILTIN_MODULES = new Set<string>([
+    'assert',
+    'buffer',
+    'child_process',
+    'cluster',
+    'console',
+    'constants',
+    'crypto',
+    'dgram',
+    'diagnostics_channel',
+    'dns',
+    'domain',
+    'events',
+    'fs',
+    'http',
+    'http2',
+    'https',
+    'inspector',
+    'module',
+    'net',
+    'os',
+    'path',
+    'perf_hooks',
+    'process',
+    'punycode',
+    'querystring',
+    'readline',
+    'repl',
+    'stream',
+    'string_decoder',
+    'timers',
+    'tls',
+    'tty',
+    'url',
+    'util',
+    'v8',
+    'vm',
+    'wasi',
+    'worker_threads',
+    'zlib'
+]);
 
 export const toRecord = <T = Record<string, unknown>>(value: unknown): T =>
     value && typeof value === 'object' && !Array.isArray(value)
@@ -126,11 +172,16 @@ const buildWorkerPayload = (
     context: WorkflowNodeHandlerContext,
     scope: WorkerScope,
     outputValue: unknown,
+    runtimeEnvironment: WorkerRuntimeEnvironment,
     nodeOverride?: WorkflowNodeModel
 ): WorkerPayload => {
     const node = nodeOverride ?? context.node;
     return {
         workflow: context.workflow,
+        ENVIRONMENT: runtimeEnvironment,
+        EXECUTOR: {
+            environment: runtimeEnvironment
+        },
         NODE_SCOPE: scope,
         NODE: toNodeFacade(node),
         self: {
@@ -141,49 +192,193 @@ const buildWorkerPayload = (
     };
 };
 
-const getTypescriptModule = async (): Promise<TypeScriptModuleApi> => {
-    const moduleRef = (await import('typescript')) as TypeScriptModuleApi & { default?: TypeScriptModuleApi };
-    return (moduleRef.default ?? moduleRef) as TypeScriptModuleApi;
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const unwrapModuleDefault = (moduleRef: unknown): unknown => {
+    let current: unknown = moduleRef;
+    for (let index = 0; index < 4; index += 1) {
+        if (!isRecord(current)) return current;
+        if (typeof current.transpileModule === 'function') return current;
+        if (!Object.prototype.hasOwnProperty.call(current, 'default')) return current;
+        current = current.default;
+    }
+    return current;
 };
 
-const formatCompileDiagnostics = (tsModule: TypeScriptModuleApi, diagnostics: readonly import('typescript').Diagnostic[] | undefined): string[] => {
+const resolveTypescriptModuleApi = (moduleRef: unknown): TypeScriptModuleApi => {
+    const resolved = unwrapModuleDefault(moduleRef);
+    if (!isRecord(resolved) || typeof resolved.transpileModule !== 'function') {
+        throw new Error('TypeScript module is missing transpileModule.');
+    }
+    return resolved as TypeScriptModuleApi;
+};
+
+const getTypescriptModule = async (moduleLoader?: TypeScriptModuleLoader): Promise<TypeScriptModuleApi> => {
+    try {
+        const moduleRef = moduleLoader ? await moduleLoader() : await import('typescript');
+        return resolveTypescriptModuleApi(moduleRef);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown TypeScript bootstrap error.';
+        throw new Error(`Worker TypeScript compiler bootstrap failed: ${message}`);
+    }
+};
+
+const resolveEnumNumber = (enumSource: unknown, key: string, fallback: number): number => {
+    if (!isRecord(enumSource)) return fallback;
+    const value = enumSource[key];
+    return typeof value === 'number' ? value : fallback;
+};
+
+const resolveCompilerOptions = (tsModule: TypeScriptModuleApi): Record<string, number | boolean> => ({
+    target: resolveEnumNumber((tsModule as unknown as Record<string, unknown>).ScriptTarget, 'ES2022', 9),
+    module: resolveEnumNumber((tsModule as unknown as Record<string, unknown>).ModuleKind, 'ESNext', 99),
+    moduleResolution: resolveEnumNumber((tsModule as unknown as Record<string, unknown>).ModuleResolutionKind, 'Bundler', 100),
+    importsNotUsedAsValues: resolveEnumNumber((tsModule as unknown as Record<string, unknown>).ImportsNotUsedAsValues, 'Remove', 0),
+    isolatedModules: true,
+    skipLibCheck: true,
+    esModuleInterop: true,
+    allowSyntheticDefaultImports: true,
+    resolveJsonModule: true,
+    strict: true
+});
+
+const formatCompileDiagnostics = (tsModule: TypeScriptModuleApi, diagnostics: unknown[] | undefined): string[] => {
     if (!diagnostics || diagnostics.length === 0) return [];
 
-    return diagnostics.map((diagnostic) => {
-        const message = tsModule.flattenDiagnosticMessageText(diagnostic.messageText, '\n');
-        if (!diagnostic.file) return message;
+    const flattenDiagnosticMessageText: (messageText: unknown, newLine: string) => string =
+        typeof tsModule.flattenDiagnosticMessageText === 'function'
+            ? (messageText, newLine) => tsModule.flattenDiagnosticMessageText(messageText as import('typescript').DiagnosticMessageChain | string | undefined, newLine)
+            : (messageText) => String(messageText ?? '');
 
-        const lineAndCharacter = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start ?? 0);
-        const line = lineAndCharacter.line + 1;
-        const character = lineAndCharacter.character + 1;
-        return `${diagnostic.file.fileName}:${line}:${character} ${message}`;
+    return diagnostics.map((diagnostic) => {
+        const diagnosticRecord = toRecord<Record<string, unknown>>(diagnostic);
+        const message = flattenDiagnosticMessageText(diagnosticRecord.messageText, '\n');
+        const file = toRecord<Record<string, unknown>>(diagnosticRecord.file);
+        const getLineAndCharacterOfPosition = file.getLineAndCharacterOfPosition;
+        if (typeof getLineAndCharacterOfPosition !== 'function') return message;
+
+        try {
+            const lineAndCharacter = toRecord(getLineAndCharacterOfPosition(diagnosticRecord.start ?? 0));
+            const line = Number(lineAndCharacter.line ?? 0) + 1;
+            const character = Number(lineAndCharacter.character ?? 0) + 1;
+            const fileName = typeof file.fileName === 'string' ? file.fileName : '<worker>';
+            return `${fileName}:${line}:${character} ${message}`;
+        } catch {
+            return message;
+        }
     });
 };
 
-const compileWorkerSource = async (modelId: string, source: string): Promise<string> => {
-    const tsModule = await getTypescriptModule();
+const normalizeNodeBuiltinSpecifier = (specifier: string): string =>
+    specifier.startsWith('node:') ? specifier.slice(5) : specifier;
+
+const isNodeBuiltinSpecifier = (specifier: string): boolean =>
+    NODE_BUILTIN_MODULES.has(normalizeNodeBuiltinSpecifier(specifier));
+
+const parseNamedBindings = (namedSection: string): Array<{ imported: string; local: string }> => {
+    return namedSection
+        .split(',')
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0)
+        .map((part) => part.replace(/^type\s+/, '').trim())
+        .filter((part) => part.length > 0)
+        .map((part) => {
+            const [left, right] = part.split(/\s+as\s+/);
+            const imported = (left ?? '').trim();
+            const local = (right ?? left ?? '').trim();
+            return { imported, local };
+        })
+        .filter((entry) => entry.imported.length > 0 && entry.local.length > 0);
+};
+
+const rewriteNodeBuiltinImportsForBrowser = (source: string): string => {
+    let importCounter = 0;
+    let rewritten = source;
+
+    rewritten = rewritten.replace(/(^|\n)([ \t]*)import\s+([\s\S]*?)\s+from\s+(['"])([^'"]+)\4\s*;?/gm, (match, prefix, indent, clauseRaw, _quote, rawSpecifier) => {
+        const specifier = String(rawSpecifier ?? '').trim();
+        if (!isNodeBuiltinSpecifier(specifier)) return match;
+
+        const clause = String(clauseRaw ?? '').trim();
+        const namedOnlyMatch = clause.match(/^\{([\s\S]*)\}$/);
+        const namespaceOnlyMatch = clause.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)$/);
+        const defaultAndRestMatch = clause.match(/^([A-Za-z_$][\w$]*)\s*,\s*([\s\S]+)$/);
+        const defaultOnlyMatch = clause.match(/^([A-Za-z_$][\w$]*)$/);
+
+        let defaultBinding: string | null = null;
+        let namespaceBinding: string | null = null;
+        let namedBindings: Array<{ imported: string; local: string }> = [];
+
+        if (namedOnlyMatch) {
+            namedBindings = parseNamedBindings(namedOnlyMatch[1] ?? '');
+        } else if (namespaceOnlyMatch) {
+            namespaceBinding = namespaceOnlyMatch[1] ?? null;
+        } else if (defaultAndRestMatch) {
+            defaultBinding = defaultAndRestMatch[1] ?? null;
+            const rest = (defaultAndRestMatch[2] ?? '').trim();
+            const restNamedMatch = rest.match(/^\{([\s\S]*)\}$/);
+            const restNamespaceMatch = rest.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)$/);
+            if (restNamedMatch) {
+                namedBindings = parseNamedBindings(restNamedMatch[1] ?? '');
+            } else if (restNamespaceMatch) {
+                namespaceBinding = restNamespaceMatch[1] ?? null;
+            }
+        } else if (defaultOnlyMatch) {
+            defaultBinding = defaultOnlyMatch[1] ?? null;
+        } else {
+            return `${prefix}${indent}/* Node builtin import "${specifier}" is ignored in browser runtime. */`;
+        }
+
+        const tempBinding = `__wfBuiltin_${normalizeNodeBuiltinSpecifier(specifier).replace(/[^a-zA-Z0-9_$]/g, '_')}_${importCounter}`;
+        importCounter += 1;
+        const importBinding = defaultBinding ?? namespaceBinding ?? tempBinding;
+        const lines: string[] = [`${indent}import ${importBinding} from '${WORKER_NODE_BUILTIN_STUB_SPECIFIER}';`];
+
+        if (namespaceBinding && namespaceBinding !== importBinding) {
+            lines.push(`${indent}const ${namespaceBinding} = ${importBinding};`);
+        }
+
+        namedBindings.forEach(({ imported, local }) => {
+            lines.push(`${indent}const ${local} = ${importBinding}.${imported};`);
+        });
+
+        return `${prefix}${lines.join('\n')}`;
+    });
+
+    rewritten = rewritten.replace(/(^|\n)([ \t]*)import\s+(['"])([^'"]+)\3\s*;?/gm, (match, prefix, indent, _quote, rawSpecifier) => {
+        const specifier = String(rawSpecifier ?? '').trim();
+        if (!isNodeBuiltinSpecifier(specifier)) return match;
+        return `${prefix}${indent}/* Node builtin side-effect import "${specifier}" is ignored in browser runtime. */`;
+    });
+
+    rewritten = rewritten.replace(/import\(\s*(['"])([^'"]+)\1\s*\)/g, (match, _quote, rawSpecifier) => {
+        const specifier = String(rawSpecifier ?? '').trim();
+        if (!isNodeBuiltinSpecifier(specifier)) return match;
+        return `import('${WORKER_NODE_BUILTIN_STUB_SPECIFIER}').then((module) => module.default ?? module)`;
+    });
+
+    return rewritten;
+};
+
+const compileWorkerSource = async (modelId: string, source: string, moduleLoader?: TypeScriptModuleLoader): Promise<string> => {
+    const tsModule = await getTypescriptModule(moduleLoader);
     const transpileResult = tsModule.transpileModule(source, {
         fileName: `${modelId}.worker.ts`,
         reportDiagnostics: true,
-        compilerOptions: {
-            target: tsModule.ScriptTarget.ES2022,
-            module: tsModule.ModuleKind.ESNext,
-            moduleResolution: tsModule.ModuleResolutionKind.Bundler,
-            importsNotUsedAsValues: tsModule.ImportsNotUsedAsValues.Remove,
-            isolatedModules: true,
-            skipLibCheck: true,
-            esModuleInterop: true,
-            allowSyntheticDefaultImports: true,
-            resolveJsonModule: true,
-            strict: true
-        }
+        compilerOptions: resolveCompilerOptions(tsModule)
     });
 
-    const diagnostics = transpileResult.diagnostics ?? [];
-    const hasError = diagnostics.some((diagnostic) => diagnostic.category === tsModule.DiagnosticCategory.Error);
+    const diagnostics = Array.isArray(transpileResult.diagnostics) ? transpileResult.diagnostics : [];
+    const errorCategory = resolveEnumNumber((tsModule as unknown as Record<string, unknown>).DiagnosticCategory, 'Error', 1);
+    const hasError = diagnostics.some((diagnostic) => Number(toRecord<Record<string, unknown>>(diagnostic).category ?? -1) === errorCategory);
     if (hasError) {
         const formatted = formatCompileDiagnostics(tsModule, diagnostics);
         throw new Error(`Worker TypeScript compile failed for model "${modelId}": ${formatted.join(' | ')}`);
+    }
+
+    if (typeof transpileResult.outputText !== 'string') {
+        throw new Error(`Worker TypeScript compile failed for model "${modelId}": transpile output was not generated.`);
     }
 
     return transpileResult.outputText;
@@ -192,13 +387,22 @@ const compileWorkerSource = async (modelId: string, source: string): Promise<str
 const rewriteWorkerSource = (
     source: string,
     executeModuleSpecifier: string,
-    executorModuleSpecifier: string
+    executorModuleSpecifier: string,
+    builtinStubSpecifier?: string
 ): string => {
-    return source
+    let rewritten = source
         .replace(/from\s+['"]@workflow\/execute['"]/g, `from '${executeModuleSpecifier}'`)
         .replace(/import\(\s*['"]@workflow\/execute['"]\s*\)/g, `import('${executeModuleSpecifier}')`)
         .replace(/from\s+['"]@workflow\/executor['"]/g, `from '${executorModuleSpecifier}'`)
         .replace(/import\(\s*['"]@workflow\/executor['"]\s*\)/g, `import('${executorModuleSpecifier}')`);
+
+    if (builtinStubSpecifier) {
+        rewritten = rewritten
+            .replace(/from\s+['"]@workflow\/node-builtin-stub['"]/g, `from '${builtinStubSpecifier}'`)
+            .replace(/import\(\s*['"]@workflow\/node-builtin-stub['"]\s*\)/g, `import('${builtinStubSpecifier}')`);
+    }
+
+    return rewritten;
 };
 
 const createVirtualExecuteModuleSource = (helperId: string): string => `
@@ -247,6 +451,22 @@ export const toErrorResult = (message, logs = []) => ({
 });
 export const toNode = (payload) => toRecord(toRecord(payload).NODE);
 export { toRecord };
+`;
+
+const createBrowserNodeBuiltinStubSource = (): string => `
+const createStub = () => {
+  let proxy;
+  const fn = () => undefined;
+  const handler = {
+    get: (_target, key) => (key === 'then' ? undefined : proxy),
+    apply: () => undefined,
+    construct: () => ({})
+  };
+  proxy = new Proxy(fn, handler);
+  return proxy;
+};
+const stub = createStub();
+export default stub;
 `;
 
 export const createNodeExecutorSignature = (modelId: string, source: string): string => {
@@ -318,6 +538,8 @@ const loadWorkerModule = async (params: {
     modelId: string;
     workflow: WorkflowDefinition;
     helperId: string;
+    runtimeEnvironment: WorkerRuntimeEnvironment;
+    typescriptModuleLoader?: TypeScriptModuleLoader;
 }): Promise<WorkerModuleExports> => {
     const encodedSource = params.workflow.NODE_EXECUTORS?.[params.modelId];
     if (typeof encodedSource !== 'string' || encodedSource.trim().length === 0) {
@@ -335,16 +557,24 @@ const loadWorkerModule = async (params: {
         throw new Error(`Worker signature mismatch for model "${params.modelId}".`);
     }
 
-    const compileCacheKey = `${params.modelId}:${expectedSignature}`;
+    const sourceForCompile =
+        params.runtimeEnvironment === WorkerRuntimeEnvironmentEnum.Browser
+            ? rewriteNodeBuiltinImportsForBrowser(source)
+            : source;
+    const compileCacheKey = `${params.runtimeEnvironment}:${params.modelId}:${expectedSignature}`;
     let compiledSource = compiledWorkerSourceBySignature.get(compileCacheKey);
     if (!compiledSource) {
-        compiledSource = await compileWorkerSource(params.modelId, source);
+        compiledSource = await compileWorkerSource(params.modelId, sourceForCompile, params.typescriptModuleLoader);
         compiledWorkerSourceBySignature.set(compileCacheKey, compiledSource);
     }
 
     const executeModuleSpecifier = `data:text/javascript;base64,${toBase64(createVirtualExecuteModuleSource(params.helperId))}`;
     const executorModuleSpecifier = `data:text/javascript;base64,${toBase64(createVirtualExecutorModuleSource())}`;
-    const rewrittenSource = rewriteWorkerSource(compiledSource, executeModuleSpecifier, executorModuleSpecifier);
+    const builtinStubSpecifier =
+        params.runtimeEnvironment === WorkerRuntimeEnvironmentEnum.Browser
+            ? `data:text/javascript;base64,${toBase64(createBrowserNodeBuiltinStubSource())}`
+            : undefined;
+    const rewrittenSource = rewriteWorkerSource(compiledSource, executeModuleSpecifier, executorModuleSpecifier, builtinStubSpecifier);
     const workerSpecifier = `data:text/javascript;base64,${toBase64(rewrittenSource)}`;
 
     let workerModule: Partial<WorkerModuleExports>;
@@ -366,10 +596,13 @@ const loadWorkerModule = async (params: {
 export const createWorkerNodeHandler = (args: {
     modelId: string;
     executeHelpers?: WorkerExecuteHelpers;
+    runtimeEnvironment?: WorkerRuntimeEnvironment;
+    typescriptModuleLoader?: TypeScriptModuleLoader;
 }): WorkflowNodeHandler => {
     return async (context) => {
         const workflowId = String(context.workflow.metadata.id || 'workflow');
         const helperId = `${workflowId}:${context.node.id}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
+        const runtimeEnvironment = args.runtimeEnvironment ?? WorkerRuntimeEnvironmentEnum.Node;
 
         const executeBackendHelper = args.executeHelpers?.executeBackend
             ? async () =>
@@ -405,15 +638,17 @@ export const createWorkerNodeHandler = (args: {
             const module = await loadWorkerModule({
                 modelId: args.modelId,
                 workflow: context.workflow,
-                helperId
+                helperId,
+                runtimeEnvironment,
+                typescriptModuleLoader: args.typescriptModuleLoader
             });
             const nodeScope: WorkerScope = {};
-            const initPayload = buildWorkerPayload(context, nodeScope, null);
+            const initPayload = buildWorkerPayload(context, nodeScope, null, runtimeEnvironment);
 
             await module.init(initPayload);
             await module.onUpdate(initPayload);
 
-            const validationResult = normalizeValidationResult(await module.validate(buildWorkerPayload(context, nodeScope, null)));
+            const validationResult = normalizeValidationResult(await module.validate(buildWorkerPayload(context, nodeScope, null, runtimeEnvironment)));
             if (!validationResult.ok) {
                 const firstError = validationResult.errors[0] ?? `Worker validation failed for node "${context.node.name}".`;
                 return toErrorResult(firstError, validationResult.warnings ?? []);
@@ -422,7 +657,7 @@ export const createWorkerNodeHandler = (args: {
             const executionNode = toRuntimePatchedNode(context.node, validationResult.normalizedRuntime);
             const warningLogs = (validationResult.warnings ?? []).map((entry) => `WARN ${entry}`);
 
-            const preUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, null, executionNode)));
+            const preUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, null, runtimeEnvironment, executionNode)));
             if (!preUpdateResult.ok) {
                 const message = preUpdateResult.error ?? `Worker onUpdate rejected node "${context.node.name}" before execute.`;
                 return toErrorResult(message, warningLogs);
@@ -433,8 +668,8 @@ export const createWorkerNodeHandler = (args: {
 
             while (attempts < MAX_ON_UPDATE_REENTRY) {
                 attempts += 1;
-                result = normalizeResult(await module.execute(buildWorkerPayload(context, nodeScope, result.output ?? null, executionNode)));
-                const postUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, result.output ?? null, executionNode)));
+                result = normalizeResult(await module.execute(buildWorkerPayload(context, nodeScope, result.output ?? null, runtimeEnvironment, executionNode)));
+                const postUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, result.output ?? null, runtimeEnvironment, executionNode)));
                 if (postUpdateResult.ok) {
                     break;
                 }
