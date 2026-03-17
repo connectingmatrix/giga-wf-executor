@@ -6,6 +6,8 @@ Shared workflow execution runtime used by both UI and backend hosts.
 
 - `createWorkflowExecutor({ mode, adapters })`
 - `executeWorkflow(...)` and `executeNodeStep(...)` through returned executor
+- `createWorkerNodeHandler(...)` and `createNodeExecutorSignature(...)` for signed worker-first execution
+- Worker helper utilities exported at root: `toRecord`, `toErrorResult`, `toNode`, `normalizeResult`
 - Shared runtime types (`@workflow/executor/types`)
 - Shared node-core utilities (`@workflow/executor/node-core`)
 - JSONL logger helper (optional host utility, not required by executor API)
@@ -22,6 +24,38 @@ The workflow executor logic was duplicated across frontend and backend. This pac
 - runtime summary generation for `Respond/End` nodes
 
 Node implementations remain host-owned and are injected by adapters.
+
+Worker-first runtime is also supported through signed worker source payloads:
+- `workflow.NODE_EXECUTORS[modelId] = base64(worker.ts source)`
+- `workflow.NODE_EXECUTOR_SIGNATURES[modelId] = signature`
+- host adapters can use `createWorkerNodeHandler(...)` to execute workers directly.
+
+## Worker-first contract
+
+Node workers are authored in node folders as `worker.ts` and are loaded from workflow payload.
+
+Required exports:
+- `validate(payload)`
+- `init(payload)`
+- `onUpdate(payload)`
+- `execute(payload)`
+
+Runtime behavior:
+- Worker source is decoded from `NODE_EXECUTORS`.
+- Raw source signature is verified before compilation.
+- Source is transpiled from TypeScript to ESM JavaScript inside executor runtime.
+- Signature is verified using `NODE_EXECUTOR_SIGNATURES`.
+- Missing or invalid signatures fail execution immediately.
+- Compile diagnostics are normalized into structured failed node outputs/logs.
+- Compiled source is cached by `(modelId, signature)` for run/step reuse.
+- `@workflow/execute` imports are supported in both forms:
+  - `import { executeBackend, updateNode } from '@workflow/execute'`
+  - `const m = await import('@workflow/execute')`
+- `@workflow/executor` helper imports are supported for worker-authored utility access at runtime.
+- Virtual helper modules expose:
+  - `executeBackend(NODELikePayload)`
+  - `updateNode(...)`
+  - `toRecord`, `toErrorResult`, `toNode`, `normalizeResult`
 
 ## Mode and adapters
 

@@ -218,3 +218,45 @@ export interface WorkflowExecutor {
     executeWorkflow: (workflow: WorkflowDefinition, options: ExecuteWorkflowOptions) => Promise<WorkflowExecutorResult>;
     executeNodeStep: (options: ExecuteNodeStepOptions) => Promise<WorkflowStepExecutorResult>;
 }
+
+export type WorkerScope = Record<string, unknown>;
+
+export interface WorkerNodeFacade extends WorkflowNodeModel {
+    PORTS: Record<string, unknown>;
+    PROPERTIES: Record<string, unknown>;
+    OUTPUT: unknown;
+}
+
+export interface WorkerSelfState {
+    status: WorkflowNodeStatus;
+    PORTS: WorkflowNodePorts;
+    OUTPUT: unknown;
+}
+
+export interface WorkerPayload {
+    workflow: WorkflowDefinition;
+    NODE_SCOPE: WorkerScope;
+    NODE: WorkerNodeFacade;
+    self: WorkerSelfState;
+}
+
+export interface WorkerValidateResult {
+    ok: boolean;
+    errors: string[];
+    warnings?: string[];
+    normalizedRuntime?: Record<string, unknown>;
+}
+
+export interface WorkerUpdateResult {
+    ok: boolean;
+    error?: string | null;
+}
+
+export type WorkerExecuteResult = WorkflowNodeHandlerResult;
+
+export interface WorkerModuleExports {
+    validate: (payload: WorkerPayload) => Promise<WorkerValidateResult | boolean | void> | WorkerValidateResult | boolean | void;
+    init: (payload: WorkerPayload) => Promise<unknown> | unknown;
+    onUpdate: (payload: WorkerPayload) => Promise<WorkerUpdateResult | boolean | void> | WorkerUpdateResult | boolean | void;
+    execute: (payload: WorkerPayload) => Promise<WorkerExecuteResult | unknown> | WorkerExecuteResult | unknown;
+}

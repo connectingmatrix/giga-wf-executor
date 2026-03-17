@@ -1,29 +1,21 @@
 import {
+    WorkerExecuteResult,
+    WorkerModuleExports,
+    WorkerPayload,
+    WorkerScope,
+    WorkerSelfState,
+    WorkerUpdateResult,
+    WorkerValidateResult,
     WorkflowDefinition,
     WorkflowNodeHandler,
     WorkflowNodeHandlerContext,
     WorkflowNodeHandlerResult,
     WorkflowNodeModel,
+    WorkflowNodePorts,
     WorkflowNodeStatusEnum
 } from '../types';
 
-type WorkerModule = {
-    validate: (payload: Record<string, unknown>) => Promise<unknown>;
-    init: (payload: Record<string, unknown>) => Promise<unknown>;
-    onUpdate: (payload: Record<string, unknown>) => Promise<unknown>;
-    execute: (payload: Record<string, unknown>) => Promise<unknown>;
-};
-
-type WorkerValidateResult = {
-    ok: boolean;
-    errors: string[];
-    warnings: string[];
-};
-
-type WorkerUpdateResult = {
-    ok: boolean;
-    error?: string;
-};
+type TypeScriptModuleApi = typeof import('typescript');
 
 interface WorkerExecuteHelpers {
     executeBackend?: (...args: unknown[]) => Promise<WorkflowNodeHandlerResult>;
@@ -38,11 +30,12 @@ const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 const globalWorkerHelpers = globalThis as typeof globalThis & GlobalWorkerHelpers;
 const MAX_ON_UPDATE_REENTRY = 6;
+const compiledWorkerSourceBySignature = new Map<string, string>();
 
-const toRecord = (value: unknown): Record<string, unknown> =>
+export const toRecord = <T = Record<string, unknown>>(value: unknown): T =>
     value && typeof value === 'object' && !Array.isArray(value)
-        ? (value as Record<string, unknown>)
-        : {};
+        ? (value as T)
+        : ({} as T);
 
 const toBase64 = (source: string): string => {
     if (typeof Buffer !== 'undefined') {
@@ -75,7 +68,7 @@ const normalizeStatus = (status: unknown): WorkflowNodeStatusEnum => {
     return WorkflowNodeStatusEnum.Passed;
 };
 
-const normalizeWorkerResult = (result: unknown): WorkflowNodeHandlerResult => {
+export const normalizeResult = (result: unknown): WorkflowNodeHandlerResult => {
     if (!result || typeof result !== 'object' || Array.isArray(result)) {
         return {
             output: result ?? null,
@@ -94,6 +87,175 @@ const normalizeWorkerResult = (result: unknown): WorkflowNodeHandlerResult => {
         status: normalizeStatus(record.status),
         logs
     };
+};
+
+export const toErrorResult = (message: unknown, logs: string[] = []): WorkflowNodeHandlerResult => ({
+    output: { error: String(message) },
+    status: WorkflowNodeStatusEnum.Failed,
+    logs: [...logs, String(message)]
+});
+
+const toNodePortsFacade = (node: WorkflowNodeModel): Record<string, unknown> => {
+    const portsIn = toRecord(node.ports?.in);
+    const portsOut = toRecord(node.ports?.out);
+    const facade: Record<string, unknown> = {
+        IN: portsIn,
+        OUT: portsOut
+    };
+
+    Object.entries(portsIn).forEach(([portId, value]) => {
+        facade[portId.toUpperCase()] = value;
+    });
+
+    return facade;
+};
+
+const toNodeFacade = (node: WorkflowNodeModel): WorkerPayload['NODE'] => ({
+    ...node,
+    PORTS: toNodePortsFacade(node),
+    PROPERTIES: toRecord(node.runtime),
+    OUTPUT: toRecord(node.ports?.out).output ?? null
+});
+
+export const toNode = (payload: unknown): WorkerPayload['NODE'] => {
+    const root = toRecord(payload);
+    return toRecord<WorkerPayload['NODE']>(root.NODE);
+};
+
+const buildWorkerPayload = (
+    context: WorkflowNodeHandlerContext,
+    scope: WorkerScope,
+    outputValue: unknown,
+    nodeOverride?: WorkflowNodeModel
+): WorkerPayload => {
+    const node = nodeOverride ?? context.node;
+    return {
+        workflow: context.workflow,
+        NODE_SCOPE: scope,
+        NODE: toNodeFacade(node),
+        self: {
+            status: node.status,
+            PORTS: node.ports,
+            OUTPUT: outputValue
+        } satisfies WorkerSelfState
+    };
+};
+
+const getTypescriptModule = async (): Promise<TypeScriptModuleApi> => {
+    const moduleRef = (await import('typescript')) as TypeScriptModuleApi & { default?: TypeScriptModuleApi };
+    return (moduleRef.default ?? moduleRef) as TypeScriptModuleApi;
+};
+
+const formatCompileDiagnostics = (tsModule: TypeScriptModuleApi, diagnostics: readonly import('typescript').Diagnostic[] | undefined): string[] => {
+    if (!diagnostics || diagnostics.length === 0) return [];
+
+    return diagnostics.map((diagnostic) => {
+        const message = tsModule.flattenDiagnosticMessageText(diagnostic.messageText, '\n');
+        if (!diagnostic.file) return message;
+
+        const lineAndCharacter = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start ?? 0);
+        const line = lineAndCharacter.line + 1;
+        const character = lineAndCharacter.character + 1;
+        return `${diagnostic.file.fileName}:${line}:${character} ${message}`;
+    });
+};
+
+const compileWorkerSource = async (modelId: string, source: string): Promise<string> => {
+    const tsModule = await getTypescriptModule();
+    const transpileResult = tsModule.transpileModule(source, {
+        fileName: `${modelId}.worker.ts`,
+        reportDiagnostics: true,
+        compilerOptions: {
+            target: tsModule.ScriptTarget.ES2022,
+            module: tsModule.ModuleKind.ESNext,
+            moduleResolution: tsModule.ModuleResolutionKind.Bundler,
+            importsNotUsedAsValues: tsModule.ImportsNotUsedAsValues.Remove,
+            isolatedModules: true,
+            skipLibCheck: true,
+            esModuleInterop: true,
+            allowSyntheticDefaultImports: true,
+            resolveJsonModule: true,
+            strict: true
+        }
+    });
+
+    const diagnostics = transpileResult.diagnostics ?? [];
+    const hasError = diagnostics.some((diagnostic) => diagnostic.category === tsModule.DiagnosticCategory.Error);
+    if (hasError) {
+        const formatted = formatCompileDiagnostics(tsModule, diagnostics);
+        throw new Error(`Worker TypeScript compile failed for model "${modelId}": ${formatted.join(' | ')}`);
+    }
+
+    return transpileResult.outputText;
+};
+
+const rewriteWorkerSource = (
+    source: string,
+    executeModuleSpecifier: string,
+    executorModuleSpecifier: string
+): string => {
+    return source
+        .replace(/from\s+['"]@workflow\/execute['"]/g, `from '${executeModuleSpecifier}'`)
+        .replace(/import\(\s*['"]@workflow\/execute['"]\s*\)/g, `import('${executeModuleSpecifier}')`)
+        .replace(/from\s+['"]@workflow\/executor['"]/g, `from '${executorModuleSpecifier}'`)
+        .replace(/import\(\s*['"]@workflow\/executor['"]\s*\)/g, `import('${executorModuleSpecifier}')`);
+};
+
+const createVirtualExecuteModuleSource = (helperId: string): string => `
+const helpers = (globalThis.__WF_EXECUTE_HELPERS__ || {})[${JSON.stringify(helperId)}] || {};
+export const executeBackend = async (NODE) => {
+  if (typeof helpers.executeBackend !== 'function') {
+    throw new Error('executeBackend helper is not available in worker runtime.');
+  }
+  return helpers.executeBackend(NODE);
+};
+export const updateNode = async (...args) => {
+  if (typeof helpers.updateNode !== 'function') {
+    return null;
+  }
+  return helpers.updateNode(...args);
+};
+`;
+
+const createVirtualExecutorModuleSource = (): string => `
+const toRecord = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+const normalizeStatus = (status) => {
+  if (status === 'failed') return 'failed';
+  if (status === 'warning') return 'warning';
+  if (status === 'running') return 'running';
+  if (status === 'stopped') return 'stopped';
+  return 'passed';
+};
+export const normalizeResult = (result) => {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    return { output: result ?? null, status: 'passed', logs: [] };
+  }
+  const record = result;
+  const logs = Array.isArray(record.logs)
+    ? record.logs.map((entry) => String(entry)).filter((entry) => entry.trim().length > 0)
+    : [];
+  return {
+    output: Object.prototype.hasOwnProperty.call(record, 'output') ? record.output : record,
+    status: normalizeStatus(record.status),
+    logs
+  };
+};
+export const toErrorResult = (message, logs = []) => ({
+  output: { error: String(message) },
+  status: 'failed',
+  logs: [...logs, String(message)]
+});
+export const toNode = (payload) => toRecord(toRecord(payload).NODE);
+export { toRecord };
+`;
+
+export const createNodeExecutorSignature = (modelId: string, source: string): string => {
+    let hash = 5381;
+    const input = `${modelId}:${source}`;
+    for (let index = 0; index < input.length; index += 1) {
+        hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
+    }
+    return `wf-sign-v1-${(hash >>> 0).toString(16)}`;
 };
 
 const normalizeValidationResult = (result: unknown): WorkerValidateResult => {
@@ -117,7 +279,8 @@ const normalizeValidationResult = (result: unknown): WorkerValidateResult => {
             : [],
         warnings: Array.isArray(record.warnings)
             ? record.warnings.map((entry) => String(entry)).filter((entry) => entry.trim().length > 0)
-            : []
+            : [],
+        normalizedRuntime: toRecord(record.normalizedRuntime)
     };
 };
 
@@ -140,81 +303,22 @@ const normalizeUpdateResult = (result: unknown): WorkerUpdateResult => {
     };
 };
 
-const buildFailureResult = (message: string, logs: string[] = []): WorkflowNodeHandlerResult => ({
-    output: { error: message },
-    status: WorkflowNodeStatusEnum.Failed,
-    logs: [...logs, message]
-});
-
-const toNodePortsFacade = (node: WorkflowNodeModel): Record<string, unknown> => {
-    const portsIn = toRecord(node.ports?.in);
-    const portsOut = toRecord(node.ports?.out);
-    const facade: Record<string, unknown> = {
-        IN: portsIn,
-        OUT: portsOut
+const toRuntimePatchedNode = (node: WorkflowNodeModel, normalizedRuntime?: Record<string, unknown>): WorkflowNodeModel => {
+    if (!normalizedRuntime || Object.keys(normalizedRuntime).length === 0) return node;
+    return {
+        ...node,
+        runtime: {
+            ...(node.runtime ?? {}),
+            ...normalizedRuntime
+        }
     };
-
-    Object.entries(portsIn).forEach(([portId, value]) => {
-        facade[portId.toUpperCase()] = value;
-    });
-
-    return facade;
-};
-
-const toNodeFacade = (node: WorkflowNodeModel): Record<string, unknown> => ({
-    ...node,
-    PORTS: toNodePortsFacade(node),
-    PROPERTIES: toRecord(node.runtime),
-    OUTPUT: toRecord(node.ports?.out).output ?? null
-});
-
-const buildWorkerPayload = (context: WorkflowNodeHandlerContext, scope: Record<string, unknown>, outputValue: unknown): Record<string, unknown> => ({
-    workflow: context.workflow,
-    NODE_SCOPE: scope,
-    NODE: toNodeFacade(context.node),
-    self: {
-        status: context.node.status,
-        PORTS: context.node.ports,
-        OUTPUT: outputValue
-    }
-});
-
-const rewriteWorkerSource = (source: string, executeModuleSpecifier: string): string => {
-    return source
-        .replace(/from\s+['"]@workflow\/execute['"]/g, `from '${executeModuleSpecifier}'`)
-        .replace(/import\(\s*['"]@workflow\/execute['"]\s*\)/g, `import('${executeModuleSpecifier}')`);
-};
-
-const createVirtualExecuteModuleSource = (helperId: string): string => `
-const helpers = (globalThis.__WF_EXECUTE_HELPERS__ || {})[${JSON.stringify(helperId)}] || {};
-export const executeBackend = async (NODE) => {
-  if (typeof helpers.executeBackend !== 'function') {
-    throw new Error('executeBackend helper is not available in worker runtime.');
-  }
-  return helpers.executeBackend(NODE);
-};
-export const updateNode = async (...args) => {
-  if (typeof helpers.updateNode !== 'function') {
-    return null;
-  }
-  return helpers.updateNode(...args);
-};
-`;
-
-export const createNodeExecutorSignature = (modelId: string, source: string): string => {
-    let hash = 5381;
-    const input = `${modelId}:${source}`;
-    for (let index = 0; index < input.length; index += 1) {
-        hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
-    }
-    return `wf-sign-v1-${(hash >>> 0).toString(16)}`;
 };
 
 const loadWorkerModule = async (params: {
     modelId: string;
     workflow: WorkflowDefinition;
     helperId: string;
-}): Promise<WorkerModule> => {
+}): Promise<WorkerModuleExports> => {
     const encodedSource = params.workflow.NODE_EXECUTORS?.[params.modelId];
     if (typeof encodedSource !== 'string' || encodedSource.trim().length === 0) {
         throw new Error(`Missing NODE_EXECUTORS entry for model "${params.modelId}".`);
@@ -231,17 +335,32 @@ const loadWorkerModule = async (params: {
         throw new Error(`Worker signature mismatch for model "${params.modelId}".`);
     }
 
+    const compileCacheKey = `${params.modelId}:${expectedSignature}`;
+    let compiledSource = compiledWorkerSourceBySignature.get(compileCacheKey);
+    if (!compiledSource) {
+        compiledSource = await compileWorkerSource(params.modelId, source);
+        compiledWorkerSourceBySignature.set(compileCacheKey, compiledSource);
+    }
+
     const executeModuleSpecifier = `data:text/javascript;base64,${toBase64(createVirtualExecuteModuleSource(params.helperId))}`;
-    const rewrittenSource = rewriteWorkerSource(source, executeModuleSpecifier);
+    const executorModuleSpecifier = `data:text/javascript;base64,${toBase64(createVirtualExecutorModuleSource())}`;
+    const rewrittenSource = rewriteWorkerSource(compiledSource, executeModuleSpecifier, executorModuleSpecifier);
     const workerSpecifier = `data:text/javascript;base64,${toBase64(rewrittenSource)}`;
 
-    const workerModule = (await import(workerSpecifier)) as Partial<WorkerModule>;
+    let workerModule: Partial<WorkerModuleExports>;
+    try {
+        workerModule = (await import(workerSpecifier)) as Partial<WorkerModuleExports>;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to load worker module.';
+        throw new Error(`Unable to load worker module for model "${params.modelId}": ${message}`);
+    }
+
     if (typeof workerModule.validate !== 'function') throw new Error(`Worker validate export is missing for model "${params.modelId}".`);
     if (typeof workerModule.init !== 'function') throw new Error(`Worker init export is missing for model "${params.modelId}".`);
     if (typeof workerModule.onUpdate !== 'function') throw new Error(`Worker onUpdate export is missing for model "${params.modelId}".`);
     if (typeof workerModule.execute !== 'function') throw new Error(`Worker execute export is missing for model "${params.modelId}".`);
 
-    return workerModule as WorkerModule;
+    return workerModule as WorkerModuleExports;
 };
 
 export const createWorkerNodeHandler = (args: {
@@ -288,7 +407,7 @@ export const createWorkerNodeHandler = (args: {
                 workflow: context.workflow,
                 helperId
             });
-            const nodeScope: Record<string, unknown> = {};
+            const nodeScope: WorkerScope = {};
             const initPayload = buildWorkerPayload(context, nodeScope, null);
 
             await module.init(initPayload);
@@ -297,34 +416,40 @@ export const createWorkerNodeHandler = (args: {
             const validationResult = normalizeValidationResult(await module.validate(buildWorkerPayload(context, nodeScope, null)));
             if (!validationResult.ok) {
                 const firstError = validationResult.errors[0] ?? `Worker validation failed for node "${context.node.name}".`;
-                return buildFailureResult(firstError, validationResult.warnings);
+                return toErrorResult(firstError, validationResult.warnings ?? []);
             }
 
-            const preUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, null)));
+            const executionNode = toRuntimePatchedNode(context.node, validationResult.normalizedRuntime);
+            const warningLogs = (validationResult.warnings ?? []).map((entry) => `WARN ${entry}`);
+
+            const preUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, null, executionNode)));
             if (!preUpdateResult.ok) {
                 const message = preUpdateResult.error ?? `Worker onUpdate rejected node "${context.node.name}" before execute.`;
-                return buildFailureResult(message);
+                return toErrorResult(message, warningLogs);
             }
 
             let attempts = 0;
-            let result: WorkflowNodeHandlerResult = buildFailureResult('Worker execution did not produce a result.');
+            let result: WorkerExecuteResult = toErrorResult('Worker execution did not produce a result.', warningLogs);
 
             while (attempts < MAX_ON_UPDATE_REENTRY) {
                 attempts += 1;
-                result = normalizeWorkerResult(await module.execute(buildWorkerPayload(context, nodeScope, result.output ?? null)));
-                const postUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, result.output ?? null)));
+                result = normalizeResult(await module.execute(buildWorkerPayload(context, nodeScope, result.output ?? null, executionNode)));
+                const postUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, result.output ?? null, executionNode)));
                 if (postUpdateResult.ok) {
                     break;
                 }
                 if (attempts >= MAX_ON_UPDATE_REENTRY) {
-                    return buildFailureResult(`Worker execute reentry limit (${MAX_ON_UPDATE_REENTRY}) reached for node "${context.node.name}".`);
+                    return toErrorResult(`Worker execute reentry limit (${MAX_ON_UPDATE_REENTRY}) reached for node "${context.node.name}".`, warningLogs);
                 }
             }
 
-            return result;
+            return {
+                ...result,
+                logs: [...warningLogs, ...(result.logs ?? [])]
+            };
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Worker execution failed.';
-            return buildFailureResult(message);
+            return toErrorResult(message);
         } finally {
             const helpers = globalWorkerHelpers.__WF_EXECUTE_HELPERS__ ?? {};
             delete helpers[helperId];

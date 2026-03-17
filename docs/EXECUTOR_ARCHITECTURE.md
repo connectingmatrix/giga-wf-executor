@@ -14,6 +14,7 @@ This document is intentionally verbose. It is designed so AI agents and engineer
 - `src/executor/failure-mitigation.ts`
 - `src/executor/variables.ts`
 - `src/executor/port-compatibility.ts`
+- `src/executor/worker-runtime.ts`
 - `src/executor/workflow-runner.ts`
 - `src/executor/step-runner.ts`
 - `src/executor/create-workflow-executor.ts`
@@ -28,8 +29,12 @@ Purpose: Defines the canonical execution contracts shared by frontend and backen
 Key groups:
 
 - Enums for node status, viewer type, log level, executor mode.
+- Worker helper types for node-authored workers: `WorkerPayload`, `WorkerNodeFacade`, `WorkerSelfState`, `WorkerScope`, `WorkerValidateResult`, `WorkerUpdateResult`, `WorkerExecuteResult`.
 - Core graph types: `WorkflowDefinition`, `WorkflowNodeModel`, `WorkflowConnectionModel`.
   - `WorkflowDefinition` supports optional `nodeModels` for schema-aware runtime behavior (for example variable permission checks).
+  - `WorkflowDefinition` also supports optional worker payload roots:
+    - `NODE_EXECUTORS` (`modelId -> base64 worker source`)
+    - `NODE_EXECUTOR_SIGNATURES` (`modelId -> signature`)
   - `WorkflowNodeModel` uses `runtime` (flat key/value) and `ports.in`/`ports.out`.
 - Runtime types: `WorkflowRuntimeSettings`, `WorkflowRunLogEvent`.
 - Handler contracts:
@@ -237,6 +242,30 @@ Functions:
   - validates disallowed usage via schema allowVariables flags when schema exists.
 - `formatVariableFailureMessage(...)`
   - builds deterministic failure message for logs and node error output.
+
+### `src/executor/worker-runtime.ts`
+
+Purpose: Signed worker-module loading and execution bridge.
+
+Functions:
+
+- `createNodeExecutorSignature(modelId, source)`
+  - creates deterministic signature string used by hosts and runtime validation.
+
+- `createWorkerNodeHandler({ modelId, executeHelpers })`
+  - decodes worker source from `workflow.NODE_EXECUTORS[modelId]`.
+  - validates signature from `workflow.NODE_EXECUTOR_SIGNATURES[modelId]`.
+  - rewrites `@workflow/execute` imports to runtime virtual helper module.
+  - caches compiled sources by `(modelId, signature)` and loads worker module from `data:` URL.
+  - enforces required exports (`validate/init/onUpdate/execute`).
+  - executes worker contract and normalizes output/status/logs.
+  - applies bounded `onUpdate` reentry protection (`6`).
+
+Worker payload contract exposed by runtime:
+- `workflow`
+- `NODE_SCOPE`
+- `NODE` (node snapshot, `PORTS`, `PROPERTIES`, `OUTPUT`)
+- `self` (`status`, `PORTS`, `OUTPUT`)
 
 ### `src/executor/create-workflow-executor.ts`
 
