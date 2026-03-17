@@ -11,6 +11,7 @@ This document is intentionally verbose. It is designed so AI agents and engineer
 - `src/node-core/summary.ts`
 - `src/node-core/viewers.ts`
 - `src/executor/jsonl-logger.ts`
+- `src/executor/failure-mitigation.ts`
 - `src/executor/workflow-runner.ts`
 - `src/executor/step-runner.ts`
 - `src/executor/create-workflow-executor.ts`
@@ -162,6 +163,11 @@ Major stages:
 6. Emit lifecycle events and timing metrics via `onEvent`.
 7. Inject workflow summary into end node input.
 8. Abort handling with `stopped` transition.
+9. Failure mitigation at shared-runner layer:
+   - `failureMitigation=retry-node` retries failed attempts (`retryCount` clamped `1..6`).
+   - `failureMitigation=stop-workflow` fails immediately.
+   - Retry-attempt logs stream as `node.log` during run.
+   - Workflow run exits without `workflow.completed` when terminal node failure occurs.
 
 ### `src/executor/step-runner.ts`
 
@@ -178,6 +184,22 @@ Major stages:
 3. Build input context from upstream outputs.
 4. Execute local or remote.
 5. Persist status/output and lifecycle events.
+6. Apply the same failure mitigation contract as DAG runs:
+   - retries on thrown errors or failed statuses,
+   - aggregate retry logs into returned step result logs.
+
+### `src/executor/failure-mitigation.ts`
+
+Purpose: Canonical runtime parsing and mitigation helpers shared by both runner paths.
+
+Functions:
+
+- `parseFailureMitigationMode(...)`
+- `parseFailureRetryCount(...)`
+- `resolveFailureRetryLimit(...)`
+- `resolveResultStatus(...)`
+- `resolveFailureMessageFromResult(...)`
+- `buildRetryAttemptLog(...)`
 
 ### `src/executor/create-workflow-executor.ts`
 

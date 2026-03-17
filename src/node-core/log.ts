@@ -14,9 +14,13 @@ export const emitNodeStarted = (sink: WorkflowEventSink, workflowId: string, run
     sink({ workflowId, runId, nodeId: node.id, event: 'node.started', level: WorkflowLogLevelEnum.Info, message: `Running ${node.name}` });
 };
 
+export const emitNodeLogs = (sink: WorkflowEventSink, workflowId: string, runId: string, nodeId: string, logs?: string[]): void => {
+    (logs ?? []).forEach((line) => sink({ workflowId, runId, nodeId, event: 'node.log', level: WorkflowLogLevelEnum.Info, message: line }));
+};
+
 export const emitNodeFinished = (sink: WorkflowEventSink, workflowId: string, runId: string, nodeId: string, status: string, durationMs: number, logs?: string[]): void => {
     sink({ workflowId, runId, nodeId, event: 'node.finished', level: resolveLogLevelFromStatus(status), data: { status, durationMs } });
-    (logs ?? []).forEach((line) => sink({ workflowId, runId, nodeId, event: 'node.log', level: WorkflowLogLevelEnum.Info, message: line }));
+    emitNodeLogs(sink, workflowId, runId, nodeId, logs);
 };
 
 export const emitNodeFailed = (sink: WorkflowEventSink, workflowId: string, runId: string, nodeId: string, message: string): void => {

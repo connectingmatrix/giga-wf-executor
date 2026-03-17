@@ -25,4 +25,83 @@ describe('shared workflow step executor', () => {
         const untouched = result.workflow.nodes.find((item) => item.id === metadata.id);
         expect(untouched?.status).toBe(WorkflowNodeStatusEnum.Stopped);
     });
+
+    it('retries step execution until success when mitigation is retry-node', async () => {
+        const workflow = createWorkflow();
+        const start = createStartNode(1);
+        const code = createCodeNode(2);
+        code.runtime = { failureMitigation: 'retry-node', retryCount: 3 };
+        workflow.nodes = [start, code];
+        workflow.connections = [createConnection('c1', start.id, code.id)];
+
+        let attempts = 0;
+        const executor = createWorkflowExecutor({
+            mode: WorkflowExecutorModeEnum.Local,
+            adapters: createAdapters({
+                code: async () => {
+                    attempts += 1;
+                    if (attempts < 3) return { output: { error: 'transient' }, status: WorkflowNodeStatusEnum.Failed, logs: [`failed ${attempts}`] };
+                    return { output: { ok: true }, status: WorkflowNodeStatusEnum.Passed, logs: ['succeeded'] };
+                }
+            })
+        });
+
+        const result = await executor.executeNodeStep({ workflow, nodeId: code.id, settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        const retryLines = result.events.filter((event) => event.nodeId === code.id && event.event === 'node.log').map((event) => String(event.message ?? ''));
+
+        expect(attempts).toBe(3);
+        expect(result.node.status).toBe(WorkflowNodeStatusEnum.Passed);
+        expect(result.result.logs).toEqual(expect.arrayContaining(['failed 1', 'failed 2', 'succeeded']));
+        expect(retryLines.some((line) => line.includes('Retrying (1/3)'))).toBe(true);
+        expect(retryLines.some((line) => line.includes('Retrying (2/3)'))).toBe(true);
+    });
+
+    it('fails step execution after retry exhaustion', async () => {
+        const workflow = createWorkflow();
+        const start = createStartNode(1);
+        const code = createCodeNode(2);
+        code.runtime = { failureMitigation: 'retry-node', retryCount: 2 };
+        workflow.nodes = [start, code];
+        workflow.connections = [createConnection('c1', start.id, code.id)];
+
+        let attempts = 0;
+        const executor = createWorkflowExecutor({
+            mode: WorkflowExecutorModeEnum.Local,
+            adapters: createAdapters({
+                code: async () => {
+                    attempts += 1;
+                    return { output: { error: 'fatal' }, status: WorkflowNodeStatusEnum.Failed, logs: [`failed ${attempts}`] };
+                }
+            })
+        });
+
+        const result = await executor.executeNodeStep({ workflow, nodeId: code.id, settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        expect(attempts).toBe(3);
+        expect(result.node.status).toBe(WorkflowNodeStatusEnum.Failed);
+        expect(result.result.status).toBe(WorkflowNodeStatusEnum.Failed);
+        expect(result.result.logs).toEqual(expect.arrayContaining(['failed 1', 'failed 2', 'failed 3']));
+    });
+
+    it('stop-workflow mitigation fails step immediately without retries', async () => {
+        const workflow = createWorkflow();
+        const code = createCodeNode(2);
+        code.runtime = { failureMitigation: 'stop-workflow' };
+        workflow.nodes = [code];
+
+        let attempts = 0;
+        const executor = createWorkflowExecutor({
+            mode: WorkflowExecutorModeEnum.Local,
+            adapters: createAdapters({
+                code: async () => {
+                    attempts += 1;
+                    return { output: { error: 'halt now' }, status: WorkflowNodeStatusEnum.Failed, logs: ['halt now'] };
+                }
+            })
+        });
+
+        const result = await executor.executeNodeStep({ workflow, nodeId: code.id, settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        expect(attempts).toBe(1);
+        expect(result.node.status).toBe(WorkflowNodeStatusEnum.Failed);
+        expect(result.result.logs).toContain('halt now');
+    });
 });

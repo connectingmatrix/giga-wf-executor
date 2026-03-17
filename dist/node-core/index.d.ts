@@ -16,6 +16,7 @@ declare const markRunningNodesAsStopped: (workflow: WorkflowDefinition) => Workf
 type WorkflowEventSink = (event: Omit<WorkflowRunLogEvent, 'timestamp'>) => void;
 declare const createRunId: (prefix: string) => string;
 declare const emitNodeStarted: (sink: WorkflowEventSink, workflowId: string, runId: string, node: WorkflowNodeModel) => void;
+declare const emitNodeLogs: (sink: WorkflowEventSink, workflowId: string, runId: string, nodeId: string, logs?: string[]) => void;
 declare const emitNodeFinished: (sink: WorkflowEventSink, workflowId: string, runId: string, nodeId: string, status: string, durationMs: number, logs?: string[]) => void;
 declare const emitNodeFailed: (sink: WorkflowEventSink, workflowId: string, runId: string, nodeId: string, message: string) => void;
 declare const emitWorkflowStopped: (sink: WorkflowEventSink, workflowId: string, runId: string) => void;
@@ -34,4 +35,4 @@ type WorkflowNodeExecutionTimingMap = Record<string, WorkflowNodeExecutionTiming
 declare const createNodeExecutionTiming: (node: WorkflowNodeModel, status: WorkflowNodeStatus, startedAt: string, finishedAt: string, durationMs: number) => WorkflowNodeExecutionTiming;
 declare const buildWorkflowSummaryInput: (runId: string, outputsByNode: Map<string, unknown>, timingsByNode: WorkflowNodeExecutionTimingMap, logs?: unknown[]) => Record<string, unknown>;
 
-export { type WorkflowEventSink, type WorkflowNodeExecutionTiming, type WorkflowNodeExecutionTimingMap, buildCompletedNodeState, buildFailedNodeState, buildNodeInputContext, buildRunningNodeState, buildWorkflowSummaryInput, collectReachableNodeIdsFromStartNodes, createNodeExecutionTiming, createRunId, emitNodeFailed, emitNodeFinished, emitNodeStarted, emitWorkflowCompleted, emitWorkflowStopped, emitWorkflowValidationFailed, markRunningNodesAsStopped, replaceNodeById, shouldExecuteNodeInCurrentRun, sortWorkflowNodesTopologically };
+export { type WorkflowEventSink, type WorkflowNodeExecutionTiming, type WorkflowNodeExecutionTimingMap, buildCompletedNodeState, buildFailedNodeState, buildNodeInputContext, buildRunningNodeState, buildWorkflowSummaryInput, collectReachableNodeIdsFromStartNodes, createNodeExecutionTiming, createRunId, emitNodeFailed, emitNodeFinished, emitNodeLogs, emitNodeStarted, emitWorkflowCompleted, emitWorkflowStopped, emitWorkflowValidationFailed, markRunningNodesAsStopped, replaceNodeById, shouldExecuteNodeInCurrentRun, sortWorkflowNodesTopologically };

@@ -67,6 +67,24 @@ const stepResult = await executor.executeNodeStep({
 });
 ```
 
+## Failure Mitigation Runtime Fields
+
+Node runtime supports built-in failure mitigation in shared executor:
+
+- `failureMitigation`:
+  - `stop-workflow` (default): fail immediately on node failure.
+  - `retry-node`: retry the same node before terminal failure.
+- `retryCount`:
+  - used only with `retry-node`.
+  - clamped to `1..6`.
+
+Behavior:
+
+- Applies to both `executeWorkflow(...)` and `executeNodeStep(...)`.
+- Retries trigger on thrown handler errors and explicit failed results (`status: "failed"`).
+- Retry attempt lines are emitted as `node.log` events during execution.
+- Final returned node result logs include aggregated retry-attempt logs plus terminal attempt logs.
+
 ## Local development
 
 ```bash

@@ -36,6 +36,7 @@ __export(index_exports, {
   createWorkflowExecutor: () => createWorkflowExecutor,
   emitNodeFailed: () => emitNodeFailed,
   emitNodeFinished: () => emitNodeFinished,
+  emitNodeLogs: () => emitNodeLogs,
   emitNodeStarted: () => emitNodeStarted,
   emitWorkflowCompleted: () => emitWorkflowCompleted,
   emitWorkflowStopped: () => emitWorkflowStopped,
@@ -228,9 +229,12 @@ var resolveLogLevelFromStatus = (status) => {
 var emitNodeStarted = (sink, workflowId, runId, node) => {
   sink({ workflowId, runId, nodeId: node.id, event: "node.started", level: "info" /* Info */, message: `Running ${node.name}` });
 };
+var emitNodeLogs = (sink, workflowId, runId, nodeId, logs) => {
+  (logs ?? []).forEach((line) => sink({ workflowId, runId, nodeId, event: "node.log", level: "info" /* Info */, message: line }));
+};
 var emitNodeFinished = (sink, workflowId, runId, nodeId, status, durationMs, logs) => {
   sink({ workflowId, runId, nodeId, event: "node.finished", level: resolveLogLevelFromStatus(status), data: { status, durationMs } });
-  (logs ?? []).forEach((line) => sink({ workflowId, runId, nodeId, event: "node.log", level: "info" /* Info */, message: line }));
+  emitNodeLogs(sink, workflowId, runId, nodeId, logs);
 };
 var emitNodeFailed = (sink, workflowId, runId, nodeId, message) => {
   sink({ workflowId, runId, nodeId, event: "node.failed", level: "error" /* Error */, message });
@@ -280,10 +284,56 @@ var createJsonlLogger = (onPush) => {
   };
 };
 
+// src/executor/failure-mitigation.ts
+var WORKFLOW_FAILURE_MITIGATION_STOP = "stop-workflow";
+var WORKFLOW_FAILURE_MITIGATION_RETRY = "retry-node";
+var WORKFLOW_MIN_RETRY_COUNT = 1;
+var WORKFLOW_MAX_RETRY_COUNT = 6;
+var parseRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+var parseFailureMitigationMode = (value) => {
+  return value === WORKFLOW_FAILURE_MITIGATION_RETRY ? WORKFLOW_FAILURE_MITIGATION_RETRY : WORKFLOW_FAILURE_MITIGATION_STOP;
+};
+var parseFailureRetryCount = (value) => {
+  const parsed = Number(String(value ?? "").trim());
+  if (!Number.isFinite(parsed)) return WORKFLOW_MIN_RETRY_COUNT;
+  const rounded = Math.round(parsed);
+  if (rounded < WORKFLOW_MIN_RETRY_COUNT) return WORKFLOW_MIN_RETRY_COUNT;
+  if (rounded > WORKFLOW_MAX_RETRY_COUNT) return WORKFLOW_MAX_RETRY_COUNT;
+  return rounded;
+};
+var resolveFailureRetryLimit = (node) => {
+  const runtime = parseRecord(node.runtime);
+  const mitigation = parseFailureMitigationMode(runtime.failureMitigation);
+  if (mitigation !== WORKFLOW_FAILURE_MITIGATION_RETRY) return 0;
+  return parseFailureRetryCount(runtime.retryCount);
+};
+var resolveResultStatus = (result, fallbackStatus = "passed" /* Passed */) => {
+  return typeof result.status === "string" ? result.status : fallbackStatus;
+};
+var resolveFailureMessageFromResult = (result, fallbackMessage = "Node execution failed.") => {
+  const output = parseRecord(result.output);
+  const candidate = output.error ?? output.message;
+  if (typeof candidate === "string" && candidate.trim().length > 0) {
+    return candidate.trim();
+  }
+  return fallbackMessage;
+};
+var buildRetryAttemptLog = (attemptNumber, retryLimit, errorMessage) => `Attempt ${attemptNumber} failed: ${errorMessage}. Retrying (${attemptNumber}/${retryLimit})...`;
+
 // src/executor/step-runner.ts
 var toPortsOut = (node) => node.ports?.out && typeof node.ports.out === "object" ? node.ports.out : {};
 var toPortsIn = (node) => node.ports?.in && typeof node.ports.in === "object" ? node.ports.in : {};
 var isNodeEnabled = (node) => typeof node.runtime?.enabled === "boolean" ? node.runtime.enabled : true;
+var toRuntimeError = (node) => {
+  const runtime = node.runtime;
+  if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return null;
+  const candidate = runtime.error;
+  return typeof candidate === "string" && candidate.trim().length > 0 ? candidate.trim() : null;
+};
+var normalizeNodeStatus = (node, status) => {
+  if (node.status === status && node.runtime?.status === status) return node;
+  return { ...node, status, runtime: { ...node.runtime ?? {}, status } };
+};
 var createEventCollector = (options) => {
   const events = [];
   const sink = (event) => {
@@ -316,33 +366,90 @@ var executeNodeStepWithContext = async (runtime, options) => {
     const input = overrideInput ?? buildNodeInputContext(workingWorkflow, targetNodeId, outputsByNode, toPortsIn(runningNode));
     emitNodeStarted(sink, options.workflow.metadata.id, runId, runningNode);
     const startedAtMs = performance.now();
+    const retryLimit = resolveFailureRetryLimit(runningNode);
+    const retryAttemptLogs = [];
+    const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
     try {
-      const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
-      if (!canRunLocally && options.executeNodeRemotely) {
-        const remoteExecution = await options.executeNodeRemotely({ workflow: workingWorkflow, nodeId: runningNode.id, settings: options.settings, overrides: runtimeOverrides, hostContext: options.hostContext });
-        workingWorkflow = remoteExecution.workflow;
-        outputsByNode.set(runningNode.id, toPortsOut(remoteExecution.node));
-        (remoteExecution.events ?? []).forEach(options.onEvent ?? (() => void 0));
-        const durationMs2 = Number((performance.now() - startedAtMs).toFixed(2));
-        emitNodeFinished(sink, options.workflow.metadata.id, runId, runningNode.id, remoteExecution.result.status ?? "passed" /* Passed */, durationMs2, remoteExecution.result.logs);
-        return { node: remoteExecution.node, result: remoteExecution.result };
-      }
       if (!canRunLocally && !options.executeNodeRemotely) throw new Error(`Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`);
-      const handler = runtime.adapters.getNodeHandler(runningNode.modelId);
-      const result = await handler({ node: { ...runningNode, ports: { ...runningNode.ports, in: input } }, workflow: workingWorkflow, settings: options.settings, input, signal: options.signal, hostContext: options.hostContext, invokeConnectedNode: async ({ nodeId, input: connectedInput, overrides }) => executeNodeById(nodeId, connectedInput, overrides) });
-      const completedNode = buildCompletedNodeState(runningNode, input, result);
-      workingWorkflow = replaceNodeById(workingWorkflow, completedNode);
-      outputsByNode.set(runningNode.id, toPortsOut(completedNode));
-      const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
-      emitNodeFinished(sink, options.workflow.metadata.id, runId, targetNodeId, completedNode.status, durationMs, result.logs);
-      return { node: completedNode, result };
+      for (let attemptNumber = 1; attemptNumber <= retryLimit + 1; attemptNumber += 1) {
+        if (!canRunLocally && options.executeNodeRemotely) {
+          const remoteExecution = await options.executeNodeRemotely({ workflow: workingWorkflow, nodeId: runningNode.id, settings: options.settings, overrides: runtimeOverrides, hostContext: options.hostContext });
+          workingWorkflow = remoteExecution.workflow;
+          (remoteExecution.events ?? []).forEach(options.onEvent ?? (() => void 0));
+          const status2 = resolveResultStatus(remoteExecution.result, remoteExecution.node.status);
+          const remoteNode = normalizeNodeStatus(remoteExecution.node, status2);
+          workingWorkflow = replaceNodeById(workingWorkflow, remoteNode);
+          outputsByNode.set(runningNode.id, toPortsOut(remoteNode));
+          if (status2 === "failed" /* Failed */) {
+            const message = resolveFailureMessageFromResult(remoteExecution.result, toRuntimeError(remoteNode) ?? "Step execution failed.");
+            const terminalAttemptLogs = [...remoteExecution.result.logs ?? []];
+            if (attemptNumber <= retryLimit) {
+              const retryLog = buildRetryAttemptLog(attemptNumber, retryLimit, message);
+              const iterationLogs = [...terminalAttemptLogs, retryLog];
+              retryAttemptLogs.push(...iterationLogs);
+              emitNodeLogs(sink, options.workflow.metadata.id, runId, runningNode.id, iterationLogs);
+              continue;
+            }
+            const failedNode = buildFailedNodeState(remoteNode, message);
+            workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
+            outputsByNode.set(runningNode.id, toPortsOut(failedNode));
+            emitNodeFailed(sink, options.workflow.metadata.id, runId, targetNodeId, message);
+            const terminalLogs3 = terminalAttemptLogs.length > 0 ? terminalAttemptLogs : [message];
+            emitNodeLogs(sink, options.workflow.metadata.id, runId, targetNodeId, terminalLogs3);
+            return { node: failedNode, result: { output: { error: message }, status: "failed" /* Failed */, logs: [...retryAttemptLogs, ...terminalLogs3] } };
+          }
+          const durationMs2 = Number((performance.now() - startedAtMs).toFixed(2));
+          const terminalLogs2 = remoteExecution.result.logs ?? [];
+          emitNodeFinished(sink, options.workflow.metadata.id, runId, runningNode.id, remoteNode.status, durationMs2, terminalLogs2);
+          return { node: remoteNode, result: { ...remoteExecution.result, status: remoteNode.status, logs: [...retryAttemptLogs, ...terminalLogs2] } };
+        }
+        const handler = runtime.adapters.getNodeHandler(runningNode.modelId);
+        const result = await handler({
+          node: { ...runningNode, ports: { ...runningNode.ports, in: input } },
+          workflow: workingWorkflow,
+          settings: options.settings,
+          input,
+          signal: options.signal,
+          hostContext: options.hostContext,
+          invokeConnectedNode: async ({ nodeId, input: connectedInput, overrides }) => executeNodeById(nodeId, connectedInput, overrides)
+        });
+        const status = resolveResultStatus(result);
+        if (status === "failed" /* Failed */) {
+          const message = resolveFailureMessageFromResult(result, "Step execution failed.");
+          const terminalAttemptLogs = [...result.logs ?? []];
+          if (attemptNumber <= retryLimit) {
+            const retryLog = buildRetryAttemptLog(attemptNumber, retryLimit, message);
+            const iterationLogs = [...terminalAttemptLogs, retryLog];
+            retryAttemptLogs.push(...iterationLogs);
+            emitNodeLogs(sink, options.workflow.metadata.id, runId, targetNodeId, iterationLogs);
+            continue;
+          }
+          const failedNode = buildFailedNodeState(runningNode, message);
+          workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
+          outputsByNode.set(runningNode.id, toPortsOut(failedNode));
+          emitNodeFailed(sink, options.workflow.metadata.id, runId, targetNodeId, message);
+          const terminalLogs2 = terminalAttemptLogs.length > 0 ? terminalAttemptLogs : [message];
+          emitNodeLogs(sink, options.workflow.metadata.id, runId, targetNodeId, terminalLogs2);
+          return { node: failedNode, result: { output: { error: message }, status: "failed" /* Failed */, logs: [...retryAttemptLogs, ...terminalLogs2] } };
+        }
+        const normalizedResult = { ...result, status };
+        const completedNode = buildCompletedNodeState(runningNode, input, normalizedResult);
+        workingWorkflow = replaceNodeById(workingWorkflow, completedNode);
+        outputsByNode.set(runningNode.id, toPortsOut(completedNode));
+        const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
+        const terminalLogs = result.logs ?? [];
+        emitNodeFinished(sink, options.workflow.metadata.id, runId, targetNodeId, completedNode.status, durationMs, terminalLogs);
+        return { node: completedNode, result: { ...normalizedResult, logs: [...retryAttemptLogs, ...terminalLogs] } };
+      }
+      throw new Error("Failure mitigation loop exited unexpectedly.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Step execution failed.";
       const failedNode = buildFailedNodeState(runningNode, message);
       workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
       outputsByNode.set(runningNode.id, toPortsOut(failedNode));
       emitNodeFailed(sink, options.workflow.metadata.id, runId, targetNodeId, message);
-      return { node: failedNode, result: { output: { error: message }, status: "failed" /* Failed */, logs: [message] } };
+      emitNodeLogs(sink, options.workflow.metadata.id, runId, targetNodeId, [message]);
+      return { node: failedNode, result: { output: { error: message }, status: "failed" /* Failed */, logs: [...retryAttemptLogs, message] } };
     } finally {
       executionStack.delete(targetNodeId);
     }
@@ -358,6 +465,16 @@ var isNodeEnabled2 = (node) => typeof node.runtime?.enabled === "boolean" ? node
 var shouldForwardLogs = (workflow) => workflow.nodes.some((node) => node.modelId === START_MODEL_ID && node.runtime?.forwardSessionLogs === true);
 var toPortsOut2 = (node) => node.ports?.out && typeof node.ports.out === "object" ? node.ports.out : {};
 var toPortsIn2 = (node) => node.ports?.in && typeof node.ports.in === "object" ? node.ports.in : {};
+var toRuntimeError2 = (node) => {
+  const runtime = node.runtime;
+  if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return null;
+  const candidate = runtime.error;
+  return typeof candidate === "string" && candidate.trim().length > 0 ? candidate.trim() : null;
+};
+var normalizeNodeStatus2 = (node, status) => {
+  if (node.status === status && node.runtime?.status === status) return node;
+  return { ...node, status, runtime: { ...node.runtime ?? {}, status } };
+};
 var createEventCollector2 = (options) => {
   const events = [];
   const sink = (event) => {
@@ -404,33 +521,11 @@ var executeWorkflowWithContext = async (runtime, workflow, options) => {
     const input = overrideInput ?? buildNodeInputContext(currentWorkflow, runningNode.id, outputsByNode, toPortsIn2(runningNode));
     const startedAt = (/* @__PURE__ */ new Date()).toISOString();
     const startedAtMs = performance.now();
-    try {
-      const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
-      if (!canRunLocally && options.executeNodeRemotely) {
-        const remoteExecution = await options.executeNodeRemotely({ workflow: currentWorkflow, nodeId: runningNode.id, settings: options.settings, overrides, hostContext: options.hostContext });
-        currentWorkflow = remoteExecution.workflow;
-        outputsByNode.set(remoteExecution.node.id, toPortsOut2(remoteExecution.node));
-        (remoteExecution.events ?? []).forEach(options.onEvent ?? (() => void 0));
-        const finishedAt2 = (/* @__PURE__ */ new Date()).toISOString();
-        const durationMs2 = Number((performance.now() - startedAtMs).toFixed(2));
-        nodeExecutionTimings[runningNode.id] = createNodeExecutionTiming(remoteExecution.node, remoteExecution.node.status, startedAt, finishedAt2, durationMs2);
-        emitNodeFinished(sink, workflow.metadata.id, runId, runningNode.id, remoteExecution.result.status ?? "passed" /* Passed */, durationMs2, remoteExecution.result.logs);
-        options.onNodeFinish?.(remoteExecution.node);
-        return { node: remoteExecution.node, result: remoteExecution.result };
-      }
-      if (!canRunLocally && !options.executeNodeRemotely) throw new Error(`Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`);
-      const result = await handler({ node: { ...runningNode, ports: { ...runningNode.ports, in: input } }, workflow: currentWorkflow, settings: options.settings, input, signal: options.signal, hostContext: options.hostContext, invokeConnectedNode: async ({ nodeId, input: nextInput, overrides: nextOverrides }) => executeConnectedNodeById(nodeId, nextInput, nextOverrides) });
-      const completedNode = buildCompletedNodeState(runningNode, input, result);
-      currentWorkflow = replaceNodeById(currentWorkflow, completedNode);
-      outputsByNode.set(completedNode.id, toPortsOut2(completedNode));
-      const finishedAt = (/* @__PURE__ */ new Date()).toISOString();
-      const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
-      nodeExecutionTimings[runningNode.id] = createNodeExecutionTiming(completedNode, completedNode.status, startedAt, finishedAt, durationMs);
-      emitNodeFinished(sink, workflow.metadata.id, runId, runningNode.id, completedNode.status, durationMs, result.logs);
-      options.onNodeFinish?.(completedNode);
-      return { node: completedNode, result };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Node execution failed.";
+    const retryLimit = resolveFailureRetryLimit(runningNode);
+    const retryAttemptLogs = [];
+    const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
+    if (!canRunLocally && !options.executeNodeRemotely) {
+      const message = `Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`;
       const failedNode = buildFailedNodeState(runningNode, message);
       currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
       outputsByNode.set(failedNode.id, toPortsOut2(failedNode));
@@ -440,6 +535,109 @@ var executeWorkflowWithContext = async (runtime, workflow, options) => {
       emitNodeFailed(sink, workflow.metadata.id, runId, runningNode.id, message);
       options.onNodeFinish?.(failedNode);
       return { node: failedNode, result: { output: { error: message }, status: "failed" /* Failed */, logs: [message] } };
+    }
+    try {
+      for (let attemptNumber = 1; attemptNumber <= retryLimit + 1; attemptNumber += 1) {
+        if (!canRunLocally && options.executeNodeRemotely) {
+          const remoteExecution = await options.executeNodeRemotely({ workflow: currentWorkflow, nodeId: runningNode.id, settings: options.settings, overrides, hostContext: options.hostContext });
+          currentWorkflow = remoteExecution.workflow;
+          (remoteExecution.events ?? []).forEach(options.onEvent ?? (() => void 0));
+          const status2 = resolveResultStatus(remoteExecution.result, remoteExecution.node.status);
+          const remoteNode = normalizeNodeStatus2(remoteExecution.node, status2);
+          currentWorkflow = replaceNodeById(currentWorkflow, remoteNode);
+          outputsByNode.set(remoteNode.id, toPortsOut2(remoteNode));
+          if (status2 === "failed" /* Failed */) {
+            const message = resolveFailureMessageFromResult(remoteExecution.result, toRuntimeError2(remoteNode) ?? "Node execution failed.");
+            const terminalAttemptLogs = [...remoteExecution.result.logs ?? []];
+            if (attemptNumber <= retryLimit) {
+              const retryLog = buildRetryAttemptLog(attemptNumber, retryLimit, message);
+              const iterationLogs = [...terminalAttemptLogs, retryLog];
+              retryAttemptLogs.push(...iterationLogs);
+              emitNodeLogs(sink, workflow.metadata.id, runId, runningNode.id, iterationLogs);
+              continue;
+            }
+            const failedNode = buildFailedNodeState(remoteNode, message);
+            currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
+            outputsByNode.set(failedNode.id, toPortsOut2(failedNode));
+            const finishedAt3 = (/* @__PURE__ */ new Date()).toISOString();
+            const durationMs3 = Number((performance.now() - startedAtMs).toFixed(2));
+            nodeExecutionTimings[runningNode.id] = createNodeExecutionTiming(failedNode, "failed" /* Failed */, startedAt, finishedAt3, durationMs3);
+            emitNodeFailed(sink, workflow.metadata.id, runId, runningNode.id, message);
+            const terminalLogs3 = terminalAttemptLogs.length > 0 ? terminalAttemptLogs : [message];
+            emitNodeLogs(sink, workflow.metadata.id, runId, runningNode.id, terminalLogs3);
+            const logs3 = [...retryAttemptLogs, ...terminalLogs3];
+            options.onNodeFinish?.(failedNode);
+            return { node: failedNode, result: { output: { error: message }, status: "failed" /* Failed */, logs: logs3 } };
+          }
+          const finishedAt2 = (/* @__PURE__ */ new Date()).toISOString();
+          const durationMs2 = Number((performance.now() - startedAtMs).toFixed(2));
+          nodeExecutionTimings[runningNode.id] = createNodeExecutionTiming(remoteNode, remoteNode.status, startedAt, finishedAt2, durationMs2);
+          const terminalLogs2 = remoteExecution.result.logs ?? [];
+          emitNodeFinished(sink, workflow.metadata.id, runId, runningNode.id, remoteNode.status, durationMs2, terminalLogs2);
+          const logs2 = [...retryAttemptLogs, ...terminalLogs2];
+          options.onNodeFinish?.(remoteNode);
+          return { node: remoteNode, result: { ...remoteExecution.result, status: remoteNode.status, logs: logs2 } };
+        }
+        const result = await handler({
+          node: { ...runningNode, ports: { ...runningNode.ports, in: input } },
+          workflow: currentWorkflow,
+          settings: options.settings,
+          input,
+          signal: options.signal,
+          hostContext: options.hostContext,
+          invokeConnectedNode: async ({ nodeId, input: nextInput, overrides: nextOverrides }) => executeConnectedNodeById(nodeId, nextInput, nextOverrides)
+        });
+        const status = resolveResultStatus(result);
+        if (status === "failed" /* Failed */) {
+          const message = resolveFailureMessageFromResult(result);
+          const terminalAttemptLogs = [...result.logs ?? []];
+          if (attemptNumber <= retryLimit) {
+            const retryLog = buildRetryAttemptLog(attemptNumber, retryLimit, message);
+            const iterationLogs = [...terminalAttemptLogs, retryLog];
+            retryAttemptLogs.push(...iterationLogs);
+            emitNodeLogs(sink, workflow.metadata.id, runId, runningNode.id, iterationLogs);
+            continue;
+          }
+          const failedNode = buildFailedNodeState(runningNode, message);
+          currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
+          outputsByNode.set(failedNode.id, toPortsOut2(failedNode));
+          const finishedAt2 = (/* @__PURE__ */ new Date()).toISOString();
+          const durationMs2 = Number((performance.now() - startedAtMs).toFixed(2));
+          nodeExecutionTimings[runningNode.id] = createNodeExecutionTiming(failedNode, "failed" /* Failed */, startedAt, finishedAt2, durationMs2);
+          emitNodeFailed(sink, workflow.metadata.id, runId, runningNode.id, message);
+          const terminalLogs2 = terminalAttemptLogs.length > 0 ? terminalAttemptLogs : [message];
+          emitNodeLogs(sink, workflow.metadata.id, runId, runningNode.id, terminalLogs2);
+          const logs2 = [...retryAttemptLogs, ...terminalLogs2];
+          options.onNodeFinish?.(failedNode);
+          return { node: failedNode, result: { output: { error: message }, status: "failed" /* Failed */, logs: logs2 } };
+        }
+        const normalizedResult = { ...result, status };
+        const completedNode = buildCompletedNodeState(runningNode, input, normalizedResult);
+        currentWorkflow = replaceNodeById(currentWorkflow, completedNode);
+        outputsByNode.set(completedNode.id, toPortsOut2(completedNode));
+        const finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+        const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
+        nodeExecutionTimings[runningNode.id] = createNodeExecutionTiming(completedNode, completedNode.status, startedAt, finishedAt, durationMs);
+        const terminalLogs = result.logs ?? [];
+        emitNodeFinished(sink, workflow.metadata.id, runId, runningNode.id, completedNode.status, durationMs, terminalLogs);
+        const logs = [...retryAttemptLogs, ...terminalLogs];
+        options.onNodeFinish?.(completedNode);
+        return { node: completedNode, result: { ...normalizedResult, logs } };
+      }
+      throw new Error("Failure mitigation loop exited unexpectedly.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Node execution failed.";
+      const failedNode = buildFailedNodeState(runningNode, message);
+      currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
+      outputsByNode.set(failedNode.id, toPortsOut2(failedNode));
+      const finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+      const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
+      nodeExecutionTimings[runningNode.id] = createNodeExecutionTiming(failedNode, "failed" /* Failed */, startedAt, finishedAt, durationMs);
+      emitNodeFailed(sink, workflow.metadata.id, runId, runningNode.id, message);
+      const terminalLogs = [...retryAttemptLogs, message];
+      emitNodeLogs(sink, workflow.metadata.id, runId, runningNode.id, [message]);
+      options.onNodeFinish?.(failedNode);
+      return { node: failedNode, result: { output: { error: message }, status: "failed" /* Failed */, logs: terminalLogs } };
     } finally {
       invocationStack.delete(connectedNodeId);
     }
@@ -469,31 +667,96 @@ var executeWorkflowWithContext = async (runtime, workflow, options) => {
     if (runningNode.modelId === END_MODEL_ID) input = { ...input, __workflow: buildWorkflowSummaryInput(runId, new Map(outputsByNode.entries()), nodeExecutionTimings, includeLogsInSummary ? events : []) };
     const startedAt = (/* @__PURE__ */ new Date()).toISOString();
     const startedAtMs = performance.now();
+    const retryLimit = resolveFailureRetryLimit(runningNode);
+    const retryAttemptLogs = [];
+    const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
     try {
-      const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
-      if (!canRunLocally && options.executeNodeRemotely) {
-        const remoteExecution = await options.executeNodeRemotely({ workflow: currentWorkflow, nodeId: runningNode.id, settings: options.settings, hostContext: options.hostContext });
-        currentWorkflow = remoteExecution.workflow;
-        outputsByNode.set(node.id, toPortsOut2(remoteExecution.node));
-        (remoteExecution.events ?? []).forEach(options.onEvent ?? (() => void 0));
-        const durationMs2 = Number((performance.now() - startedAtMs).toFixed(2));
-        nodeExecutionTimings[node.id] = createNodeExecutionTiming(remoteExecution.node, remoteExecution.node.status, startedAt, (/* @__PURE__ */ new Date()).toISOString(), durationMs2);
-        emitNodeFinished(sink, workflow.metadata.id, runId, node.id, remoteExecution.result.status ?? "passed" /* Passed */, durationMs2, remoteExecution.result.logs);
-        options.onNodeFinish?.(remoteExecution.node);
-        continue;
-      }
       if (!canRunLocally && !options.executeNodeRemotely) throw new Error(`Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`);
-      const result = await handler({ node: { ...runningNode, ports: { ...runningNode.ports, in: input } }, workflow: currentWorkflow, settings: options.settings, input, signal: options.signal, hostContext: options.hostContext, invokeConnectedNode: async ({ nodeId: nodeId2, input: nextInput, overrides }) => executeConnectedNodeById(nodeId2, nextInput, overrides) });
-      const completedNode = buildCompletedNodeState(runningNode, input, result);
-      currentWorkflow = replaceNodeById(currentWorkflow, completedNode);
-      outputsByNode.set(node.id, toPortsOut2(completedNode));
-      const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
-      nodeExecutionTimings[node.id] = createNodeExecutionTiming(completedNode, completedNode.status, startedAt, (/* @__PURE__ */ new Date()).toISOString(), durationMs);
-      emitNodeFinished(sink, workflow.metadata.id, runId, node.id, completedNode.status, durationMs, result.logs);
-      options.onNodeFinish?.(completedNode);
-      if (completedNode.status === "stopped" /* Stopped */) {
-        emitWorkflowStopped(sink, workflow.metadata.id, runId);
-        return { workflow: currentWorkflow, stopped: true, events };
+      for (let attemptNumber = 1; attemptNumber <= retryLimit + 1; attemptNumber += 1) {
+        if (!canRunLocally && options.executeNodeRemotely) {
+          const remoteExecution = await options.executeNodeRemotely({ workflow: currentWorkflow, nodeId: runningNode.id, settings: options.settings, hostContext: options.hostContext });
+          currentWorkflow = remoteExecution.workflow;
+          (remoteExecution.events ?? []).forEach(options.onEvent ?? (() => void 0));
+          const status2 = resolveResultStatus(remoteExecution.result, remoteExecution.node.status);
+          const remoteNode = normalizeNodeStatus2(remoteExecution.node, status2);
+          currentWorkflow = replaceNodeById(currentWorkflow, remoteNode);
+          outputsByNode.set(node.id, toPortsOut2(remoteNode));
+          if (status2 === "failed" /* Failed */) {
+            const message = resolveFailureMessageFromResult(remoteExecution.result, toRuntimeError2(remoteNode) ?? "Node execution failed.");
+            const terminalAttemptLogs = [...remoteExecution.result.logs ?? []];
+            if (attemptNumber <= retryLimit) {
+              const retryLog = buildRetryAttemptLog(attemptNumber, retryLimit, message);
+              const iterationLogs = [...terminalAttemptLogs, retryLog];
+              retryAttemptLogs.push(...iterationLogs);
+              emitNodeLogs(sink, workflow.metadata.id, runId, node.id, iterationLogs);
+              continue;
+            }
+            const failedNode = buildFailedNodeState(remoteNode, message);
+            currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
+            outputsByNode.set(node.id, toPortsOut2(failedNode));
+            const durationMs3 = Number((performance.now() - startedAtMs).toFixed(2));
+            nodeExecutionTimings[node.id] = createNodeExecutionTiming(failedNode, "failed" /* Failed */, startedAt, (/* @__PURE__ */ new Date()).toISOString(), durationMs3);
+            emitNodeFailed(sink, workflow.metadata.id, runId, node.id, message);
+            const terminalLogs3 = terminalAttemptLogs.length > 0 ? terminalAttemptLogs : [message];
+            emitNodeLogs(sink, workflow.metadata.id, runId, node.id, terminalLogs3);
+            options.onNodeFinish?.(failedNode);
+            return { workflow: currentWorkflow, stopped: false, events };
+          }
+          const durationMs2 = Number((performance.now() - startedAtMs).toFixed(2));
+          nodeExecutionTimings[node.id] = createNodeExecutionTiming(remoteNode, remoteNode.status, startedAt, (/* @__PURE__ */ new Date()).toISOString(), durationMs2);
+          const terminalLogs2 = remoteExecution.result.logs ?? [];
+          emitNodeFinished(sink, workflow.metadata.id, runId, node.id, remoteNode.status, durationMs2, terminalLogs2);
+          options.onNodeFinish?.(remoteNode);
+          if (remoteNode.status === "stopped" /* Stopped */) {
+            emitWorkflowStopped(sink, workflow.metadata.id, runId);
+            return { workflow: currentWorkflow, stopped: true, events };
+          }
+          break;
+        }
+        const result = await handler({
+          node: { ...runningNode, ports: { ...runningNode.ports, in: input } },
+          workflow: currentWorkflow,
+          settings: options.settings,
+          input,
+          signal: options.signal,
+          hostContext: options.hostContext,
+          invokeConnectedNode: async ({ nodeId: nodeId2, input: nextInput, overrides }) => executeConnectedNodeById(nodeId2, nextInput, overrides)
+        });
+        const status = resolveResultStatus(result);
+        if (status === "failed" /* Failed */) {
+          const message = resolveFailureMessageFromResult(result);
+          const terminalAttemptLogs = [...result.logs ?? []];
+          if (attemptNumber <= retryLimit) {
+            const retryLog = buildRetryAttemptLog(attemptNumber, retryLimit, message);
+            const iterationLogs = [...terminalAttemptLogs, retryLog];
+            retryAttemptLogs.push(...iterationLogs);
+            emitNodeLogs(sink, workflow.metadata.id, runId, node.id, iterationLogs);
+            continue;
+          }
+          const failedNode = buildFailedNodeState(runningNode, message);
+          currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
+          outputsByNode.set(node.id, toPortsOut2(failedNode));
+          nodeExecutionTimings[node.id] = createNodeExecutionTiming(failedNode, "failed" /* Failed */, startedAt, (/* @__PURE__ */ new Date()).toISOString(), Number((performance.now() - startedAtMs).toFixed(2)));
+          emitNodeFailed(sink, workflow.metadata.id, runId, node.id, message);
+          const terminalLogs2 = terminalAttemptLogs.length > 0 ? terminalAttemptLogs : [message];
+          emitNodeLogs(sink, workflow.metadata.id, runId, node.id, terminalLogs2);
+          options.onNodeFinish?.(failedNode);
+          return { workflow: currentWorkflow, stopped: false, events };
+        }
+        const normalizedResult = { ...result, status };
+        const completedNode = buildCompletedNodeState(runningNode, input, normalizedResult);
+        currentWorkflow = replaceNodeById(currentWorkflow, completedNode);
+        outputsByNode.set(node.id, toPortsOut2(completedNode));
+        const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
+        nodeExecutionTimings[node.id] = createNodeExecutionTiming(completedNode, completedNode.status, startedAt, (/* @__PURE__ */ new Date()).toISOString(), durationMs);
+        const terminalLogs = result.logs ?? [];
+        emitNodeFinished(sink, workflow.metadata.id, runId, node.id, completedNode.status, durationMs, terminalLogs);
+        options.onNodeFinish?.(completedNode);
+        if (completedNode.status === "stopped" /* Stopped */) {
+          emitWorkflowStopped(sink, workflow.metadata.id, runId);
+          return { workflow: currentWorkflow, stopped: true, events };
+        }
+        break;
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Node execution failed.";
@@ -501,7 +764,9 @@ var executeWorkflowWithContext = async (runtime, workflow, options) => {
       currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
       nodeExecutionTimings[node.id] = createNodeExecutionTiming(failedNode, "failed" /* Failed */, startedAt, (/* @__PURE__ */ new Date()).toISOString(), Number((performance.now() - startedAtMs).toFixed(2)));
       emitNodeFailed(sink, workflow.metadata.id, runId, node.id, message);
+      emitNodeLogs(sink, workflow.metadata.id, runId, node.id, [message]);
       options.onNodeFinish?.(failedNode);
+      return { workflow: currentWorkflow, stopped: false, events };
     }
   }
   emitWorkflowCompleted(sink, workflow.metadata.id, runId);
@@ -539,6 +804,7 @@ var createWorkflowExecutor = (args) => {
   createWorkflowExecutor,
   emitNodeFailed,
   emitNodeFinished,
+  emitNodeLogs,
   emitNodeStarted,
   emitWorkflowCompleted,
   emitWorkflowStopped,

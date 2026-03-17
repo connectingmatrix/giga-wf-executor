@@ -152,9 +152,12 @@ var resolveLogLevelFromStatus = (status) => {
 var emitNodeStarted = (sink, workflowId, runId, node) => {
   sink({ workflowId, runId, nodeId: node.id, event: "node.started", level: "info" /* Info */, message: `Running ${node.name}` });
 };
+var emitNodeLogs = (sink, workflowId, runId, nodeId, logs) => {
+  (logs ?? []).forEach((line) => sink({ workflowId, runId, nodeId, event: "node.log", level: "info" /* Info */, message: line }));
+};
 var emitNodeFinished = (sink, workflowId, runId, nodeId, status, durationMs, logs) => {
   sink({ workflowId, runId, nodeId, event: "node.finished", level: resolveLogLevelFromStatus(status), data: { status, durationMs } });
-  (logs ?? []).forEach((line) => sink({ workflowId, runId, nodeId, event: "node.log", level: "info" /* Info */, message: line }));
+  emitNodeLogs(sink, workflowId, runId, nodeId, logs);
 };
 var emitNodeFailed = (sink, workflowId, runId, nodeId, message) => {
   sink({ workflowId, runId, nodeId, event: "node.failed", level: "error" /* Error */, message });
@@ -198,6 +201,7 @@ export {
   markRunningNodesAsStopped,
   createRunId,
   emitNodeStarted,
+  emitNodeLogs,
   emitNodeFinished,
   emitNodeFailed,
   emitWorkflowStopped,
