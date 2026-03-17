@@ -206,12 +206,41 @@ const unwrapModuleDefault = (moduleRef: unknown): unknown => {
     return current;
 };
 
+const findTypeScriptApiCandidate = (moduleRef: unknown): TypeScriptModuleApi | null => {
+    const visited = new Set<unknown>();
+    const queue: unknown[] = [moduleRef];
+    let depth = 0;
+
+    while (queue.length > 0 && depth < 64) {
+        const current = queue.shift();
+        depth += 1;
+        if (!isRecord(current) || visited.has(current)) continue;
+        visited.add(current);
+        if (typeof current.transpileModule === 'function') {
+            return current as TypeScriptModuleApi;
+        }
+
+        Object.values(current).forEach((value) => {
+            if (isRecord(value) && !visited.has(value)) {
+                queue.push(value);
+            }
+        });
+    }
+
+    return null;
+};
+
 const resolveTypescriptModuleApi = (moduleRef: unknown): TypeScriptModuleApi => {
     const resolved = unwrapModuleDefault(moduleRef);
-    if (!isRecord(resolved) || typeof resolved.transpileModule !== 'function') {
+    const directCandidate =
+        isRecord(resolved) && typeof resolved.transpileModule === 'function'
+            ? (resolved as TypeScriptModuleApi)
+            : null;
+    const candidate = directCandidate ?? findTypeScriptApiCandidate(resolved);
+    if (!candidate) {
         throw new Error('TypeScript module is missing transpileModule.');
     }
-    return resolved as TypeScriptModuleApi;
+    return candidate;
 };
 
 const getTypescriptModule = async (moduleLoader?: TypeScriptModuleLoader): Promise<TypeScriptModuleApi> => {
