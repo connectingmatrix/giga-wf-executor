@@ -31,6 +31,8 @@ describe('shared workflow step executor', () => {
         const start = createStartNode(1);
         const code = createCodeNode(2);
         code.runtime = { failureMitigation: 'retry-node', retryCount: 3 };
+        start.status = WorkflowNodeStatusEnum.Passed;
+        start.ports.out = { output: { message: 'Hi' } };
         workflow.nodes = [start, code];
         workflow.connections = [createConnection('c1', start.id, code.id)];
 
@@ -103,5 +105,73 @@ describe('shared workflow step executor', () => {
         expect(attempts).toBe(1);
         expect(result.node.status).toBe(WorkflowNodeStatusEnum.Failed);
         expect(result.result.logs).toContain('halt now');
+    });
+});
+
+describe('step variable resolution', () => {
+    it('resolves runtime variable tokens in step execution', async () => {
+        const workflow = createWorkflow();
+        const start = createStartNode(1);
+        start.status = WorkflowNodeStatusEnum.Passed;
+        start.ports.out = { output: { message: 'Hi' } };
+        const code = createCodeNode(2);
+        code.runtime = { prompt: 'Summary {{input.node_start_1.output.message}}' };
+        workflow.nodes = [start, code];
+        workflow.connections = [createConnection('c1', start.id, code.id)];
+        workflow.nodeModels = {
+            code: {
+                id: 'code',
+                fields: {
+                    prompt: {
+                        type: 'textarea',
+                        allowVariables: true
+                    }
+                }
+            }
+        };
+
+        let seenPrompt = '';
+        const executor = createWorkflowExecutor({
+            mode: WorkflowExecutorModeEnum.Local,
+            adapters: createAdapters({
+                code: async (node) => {
+                    seenPrompt = String(node.runtime.prompt ?? '');
+                    return { output: { prompt: seenPrompt }, status: WorkflowNodeStatusEnum.Passed };
+                }
+            })
+        });
+
+        const result = await executor.executeNodeStep({ workflow, nodeId: code.id, settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        expect(seenPrompt).toBe('Summary Hi');
+        expect(result.node.status).toBe(WorkflowNodeStatusEnum.Passed);
+    });
+
+    it('fails step execution when variable token is unresolved', async () => {
+        const workflow = createWorkflow();
+        const code = createCodeNode(2);
+        code.runtime = { prompt: 'Summary {{input.node_start_1.output.message}}' };
+        workflow.nodes = [code];
+        workflow.nodeModels = {
+            code: {
+                id: 'code',
+                fields: {
+                    prompt: {
+                        type: 'textarea',
+                        allowVariables: true
+                    }
+                }
+            }
+        };
+
+        const executor = createWorkflowExecutor({
+            mode: WorkflowExecutorModeEnum.Local,
+            adapters: createAdapters({
+                code: async () => ({ output: { ok: true }, status: WorkflowNodeStatusEnum.Passed })
+            })
+        });
+
+        const result = await executor.executeNodeStep({ workflow, nodeId: code.id, settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        expect(result.node.status).toBe(WorkflowNodeStatusEnum.Failed);
+        expect(result.result.status).toBe(WorkflowNodeStatusEnum.Failed);
     });
 });

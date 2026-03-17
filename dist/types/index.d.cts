@@ -68,6 +68,19 @@ interface WorkflowConnectionModel {
     targetHandle?: string;
     text?: string;
 }
+interface WorkflowNodeFieldSchema {
+    allowVariables?: boolean;
+    hidden?: boolean;
+    auto?: boolean;
+    editable?: boolean;
+    type?: string;
+    [key: string]: unknown;
+}
+interface WorkflowNodeSchema {
+    id?: string;
+    fields?: Record<string, WorkflowNodeFieldSchema>;
+    [key: string]: unknown;
+}
 interface WorkflowMetadata {
     id: string;
     name: string;
@@ -79,6 +92,7 @@ interface WorkflowMetadata {
 }
 interface WorkflowDefinition {
     metadata: WorkflowMetadata;
+    nodeModels?: Record<string, WorkflowNodeSchema>;
     nodes: WorkflowNodeModel[];
     connections: WorkflowConnectionModel[];
 }
@@ -168,4 +182,4 @@ interface WorkflowExecutor {
     executeNodeStep: (options: ExecuteNodeStepOptions) => Promise<WorkflowStepExecutorResult>;
 }
 
-export { type ExecuteNodeStepOptions, type ExecuteWorkflowOptions, type WorkflowConnectionModel, type WorkflowDefinition, type WorkflowExecutor, type WorkflowExecutorAdapters, type WorkflowExecutorMode, WorkflowExecutorModeEnum, type WorkflowExecutorRemoteNodeResult, type WorkflowExecutorResult, type WorkflowInvokeConnectedNodeArgs, type WorkflowLogLevel, WorkflowLogLevelEnum, type WorkflowLogger, type WorkflowMetadata, type WorkflowNodeHandler, type WorkflowNodeHandlerContext, type WorkflowNodeHandlerResult, type WorkflowNodeKind, WorkflowNodeKindEnum, type WorkflowNodeModel, type WorkflowNodePorts, type WorkflowNodeStatus, WorkflowNodeStatusEnum, type WorkflowRunLogEvent, type WorkflowRuntimeSettings, type WorkflowStepExecutorResult, type WorkflowStepOverrides };
+export { type ExecuteNodeStepOptions, type ExecuteWorkflowOptions, type WorkflowConnectionModel, type WorkflowDefinition, type WorkflowExecutor, type WorkflowExecutorAdapters, type WorkflowExecutorMode, WorkflowExecutorModeEnum, type WorkflowExecutorRemoteNodeResult, type WorkflowExecutorResult, type WorkflowInvokeConnectedNodeArgs, type WorkflowLogLevel, WorkflowLogLevelEnum, type WorkflowLogger, type WorkflowMetadata, type WorkflowNodeFieldSchema, type WorkflowNodeHandler, type WorkflowNodeHandlerContext, type WorkflowNodeHandlerResult, type WorkflowNodeKind, WorkflowNodeKindEnum, type WorkflowNodeModel, type WorkflowNodePorts, type WorkflowNodeSchema, type WorkflowNodeStatus, WorkflowNodeStatusEnum, type WorkflowRunLogEvent, type WorkflowRuntimeSettings, type WorkflowStepExecutorResult, type WorkflowStepOverrides };

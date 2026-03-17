@@ -85,6 +85,31 @@ Behavior:
 - Retry attempt lines are emitted as `node.log` events during execution.
 - Final returned node result logs include aggregated retry-attempt logs plus terminal attempt logs.
 
+## Variable Resolution Runtime Fields
+
+Shared executor now resolves template tokens in node runtime values before handler execution.
+
+Supported token syntax:
+
+- `{{input.node_id.output.key}}`
+
+Behavior:
+
+- Resolution runs in both `executeWorkflow(...)` and `executeNodeStep(...)`.
+- Resolution context includes:
+  - upstream input map (port and source-node aliases),
+  - node runtime/properties map,
+  - workflow metadata.
+- If any token cannot be resolved, node fails before handler call with:
+  - `output.error` message,
+  - `output.variableFailures` detail array,
+  - failed lifecycle events/log lines.
+- Schema permission enforcement:
+  - when `workflow.nodeModels[modelId].fields[field].allowVariables` exists, it is enforced.
+  - disallowed token usage fails node before handler call.
+  - if schema is missing, fallback is allow.
+- Runtime resolution is execution-only; it does not overwrite canonical stored node configuration.
+
 ## Local development
 
 ```bash

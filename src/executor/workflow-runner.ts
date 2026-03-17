@@ -4,6 +4,7 @@ import { createRunId, emitNodeFailed, emitNodeFinished, emitNodeLogs, emitNodeSt
 import { buildCompletedNodeState, buildFailedNodeState, buildRunningNodeState, markRunningNodesAsStopped, replaceNodeById } from '../node-core/state';
 import { buildWorkflowSummaryInput, createNodeExecutionTiming, WorkflowNodeExecutionTimingMap } from '../node-core/summary';
 import { buildRetryAttemptLog, resolveFailureMessageFromResult, resolveFailureRetryLimit, resolveResultStatus } from './failure-mitigation';
+import { formatVariableFailureMessage, resolveNodeRuntimeVariables } from './variables';
 
 const START_MODEL_ID = 'start';
 const END_MODEL_ID = 'respond-end';
@@ -75,13 +76,38 @@ export const executeWorkflowWithContext = async (runtime: WorkflowRunnerContext,
         currentWorkflow = replaceNodeById(currentWorkflow, runningNode);
         options.onNodeStart?.(runningNode.id);
         emitNodeStarted(sink, workflow.metadata.id, runId, runningNode);
-        const handler = runtime.adapters.getNodeHandler(runningNode.modelId);
         const input = overrideInput ?? buildNodeInputContext(currentWorkflow, runningNode.id, outputsByNode, toPortsIn(runningNode));
         const startedAt = new Date().toISOString();
         const startedAtMs = performance.now();
         const retryLimit = resolveFailureRetryLimit(runningNode);
         const retryAttemptLogs: string[] = [];
         const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
+        const variableResolution = resolveNodeRuntimeVariables(currentWorkflow, runningNode, input);
+        if (!variableResolution.ok) {
+            const message = formatVariableFailureMessage(variableResolution.failures, runningNode.name);
+            const failedNode = buildFailedNodeState(runningNode, message);
+            currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
+            outputsByNode.set(failedNode.id, toPortsOut(failedNode));
+            const finishedAt = new Date().toISOString();
+            const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
+            nodeExecutionTimings[runningNode.id] = createNodeExecutionTiming(failedNode, WorkflowNodeStatusEnum.Failed, startedAt, finishedAt, durationMs);
+            emitNodeFailed(sink, workflow.metadata.id, runId, runningNode.id, message);
+            emitNodeLogs(sink, workflow.metadata.id, runId, runningNode.id, [message]);
+            options.onNodeFinish?.(failedNode);
+            return {
+                node: failedNode,
+                result: {
+                    output: { error: message, variableFailures: variableResolution.failures },
+                    status: WorkflowNodeStatusEnum.Failed,
+                    logs: [message]
+                }
+            };
+        }
+        const executableNode: WorkflowNodeModel = {
+            ...runningNode,
+            runtime: { ...(runningNode.runtime ?? {}), ...variableResolution.runtime }
+        };
+        const handler = runtime.adapters.getNodeHandler(executableNode.modelId);
         if (!canRunLocally && !options.executeNodeRemotely) {
             const message = `Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`;
             const failedNode = buildFailedNodeState(runningNode, message);
@@ -142,7 +168,7 @@ export const executeWorkflowWithContext = async (runtime: WorkflowRunnerContext,
                 }
 
                 const result = await handler({
-                    node: { ...runningNode, ports: { ...runningNode.ports, in: input } },
+                    node: { ...executableNode, ports: { ...executableNode.ports, in: input } },
                     workflow: currentWorkflow,
                     settings: options.settings,
                     input,
@@ -230,7 +256,6 @@ export const executeWorkflowWithContext = async (runtime: WorkflowRunnerContext,
         currentWorkflow = replaceNodeById(currentWorkflow, runningNode);
         options.onNodeStart?.(node.id);
         emitNodeStarted(sink, workflow.metadata.id, runId, runningNode);
-        const handler = runtime.adapters.getNodeHandler(node.modelId);
         let input = buildNodeInputContext(currentWorkflow, node.id, outputsByNode, toPortsIn(runningNode));
         if (runningNode.modelId === END_MODEL_ID) input = { ...input, __workflow: buildWorkflowSummaryInput(runId, new Map(outputsByNode.entries()), nodeExecutionTimings, includeLogsInSummary ? events : []) };
         const startedAt = new Date().toISOString();
@@ -238,6 +263,24 @@ export const executeWorkflowWithContext = async (runtime: WorkflowRunnerContext,
         const retryLimit = resolveFailureRetryLimit(runningNode);
         const retryAttemptLogs: string[] = [];
         const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
+        const variableResolution = resolveNodeRuntimeVariables(currentWorkflow, runningNode, input);
+        if (!variableResolution.ok) {
+            const message = formatVariableFailureMessage(variableResolution.failures, runningNode.name);
+            const failedNode = buildFailedNodeState(runningNode, message);
+            currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
+            outputsByNode.set(node.id, toPortsOut(failedNode));
+            const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
+            nodeExecutionTimings[node.id] = createNodeExecutionTiming(failedNode, WorkflowNodeStatusEnum.Failed, startedAt, new Date().toISOString(), durationMs);
+            emitNodeFailed(sink, workflow.metadata.id, runId, node.id, message);
+            emitNodeLogs(sink, workflow.metadata.id, runId, node.id, [message]);
+            options.onNodeFinish?.(failedNode);
+            return { workflow: currentWorkflow, stopped: false, events };
+        }
+        const executableNode: WorkflowNodeModel = {
+            ...runningNode,
+            runtime: { ...(runningNode.runtime ?? {}), ...variableResolution.runtime }
+        };
+        const handler = runtime.adapters.getNodeHandler(executableNode.modelId);
 
         try {
             if (!canRunLocally && !options.executeNodeRemotely) throw new Error(`Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`);
@@ -288,7 +331,7 @@ export const executeWorkflowWithContext = async (runtime: WorkflowRunnerContext,
                 }
 
                 const result = await handler({
-                    node: { ...runningNode, ports: { ...runningNode.ports, in: input } },
+                    node: { ...executableNode, ports: { ...executableNode.ports, in: input } },
                     workflow: currentWorkflow,
                     settings: options.settings,
                     input,

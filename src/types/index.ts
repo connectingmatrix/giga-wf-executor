@@ -75,6 +75,21 @@ export interface WorkflowConnectionModel {
     text?: string;
 }
 
+export interface WorkflowNodeFieldSchema {
+    allowVariables?: boolean;
+    hidden?: boolean;
+    auto?: boolean;
+    editable?: boolean;
+    type?: string;
+    [key: string]: unknown;
+}
+
+export interface WorkflowNodeSchema {
+    id?: string;
+    fields?: Record<string, WorkflowNodeFieldSchema>;
+    [key: string]: unknown;
+}
+
 export interface WorkflowMetadata {
     id: string;
     name: string;
@@ -87,6 +102,7 @@ export interface WorkflowMetadata {
 
 export interface WorkflowDefinition {
     metadata: WorkflowMetadata;
+    nodeModels?: Record<string, WorkflowNodeSchema>;
     nodes: WorkflowNodeModel[];
     connections: WorkflowConnectionModel[];
 }

@@ -3,6 +3,7 @@ import { createRunId, emitNodeFailed, emitNodeFinished, emitNodeLogs, emitNodeSt
 import { buildCompletedNodeState, buildFailedNodeState, buildRunningNodeState, replaceNodeById } from '../node-core/state';
 import { ExecuteNodeStepOptions, WorkflowDefinition, WorkflowExecutorAdapters, WorkflowExecutorMode, WorkflowNodeHandlerResult, WorkflowNodeModel, WorkflowNodeStatusEnum, WorkflowRunLogEvent, WorkflowStepExecutorResult } from '../types';
 import { buildRetryAttemptLog, resolveFailureMessageFromResult, resolveFailureRetryLimit, resolveResultStatus } from './failure-mitigation';
+import { formatVariableFailureMessage, resolveNodeRuntimeVariables } from './variables';
 
 export interface WorkflowStepRunnerContext {
     mode: WorkflowExecutorMode;
@@ -63,6 +64,27 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
         const retryLimit = resolveFailureRetryLimit(runningNode);
         const retryAttemptLogs: string[] = [];
         const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
+        const variableResolution = resolveNodeRuntimeVariables(workingWorkflow, runningNode, input);
+        if (!variableResolution.ok) {
+            const message = formatVariableFailureMessage(variableResolution.failures, runningNode.name);
+            const failedNode = buildFailedNodeState(runningNode, message);
+            workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
+            outputsByNode.set(runningNode.id, toPortsOut(failedNode));
+            emitNodeFailed(sink, options.workflow.metadata.id, runId, targetNodeId, message);
+            emitNodeLogs(sink, options.workflow.metadata.id, runId, targetNodeId, [message]);
+            return {
+                node: failedNode,
+                result: {
+                    output: { error: message, variableFailures: variableResolution.failures },
+                    status: WorkflowNodeStatusEnum.Failed,
+                    logs: [message]
+                }
+            };
+        }
+        const executableNode: WorkflowNodeModel = {
+            ...runningNode,
+            runtime: { ...(runningNode.runtime ?? {}), ...variableResolution.runtime }
+        };
 
         try {
             if (!canRunLocally && !options.executeNodeRemotely) throw new Error(`Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`);
@@ -103,9 +125,9 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
                     return { node: remoteNode, result: { ...remoteExecution.result, status: remoteNode.status, logs: [...retryAttemptLogs, ...terminalLogs] } };
                 }
 
-                const handler = runtime.adapters.getNodeHandler(runningNode.modelId);
+                const handler = runtime.adapters.getNodeHandler(executableNode.modelId);
                 const result = await handler({
-                    node: { ...runningNode, ports: { ...runningNode.ports, in: input } },
+                    node: { ...executableNode, ports: { ...executableNode.ports, in: input } },
                     workflow: workingWorkflow,
                     settings: options.settings,
                     input,

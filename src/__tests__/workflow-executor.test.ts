@@ -159,3 +159,111 @@ describe('shared workflow executor', () => {
         expect(result.events.some((event) => event.event === 'workflow.completed')).toBe(false);
     });
 });
+
+describe('workflow variable resolution', () => {
+    it('resolves runtime variable tokens before node execution', async () => {
+        const workflow = createWorkflow();
+        const start = createStartNode(1);
+        const metadata = createMetadataNode(2, 'Uses Variable');
+        const end = createEndNode(3);
+        metadata.runtime = { prompt: 'Use {{input.node_start_1.output.answer}}' };
+        workflow.nodes = [start, metadata, end];
+        workflow.connections = [createConnection('c1', start.id, metadata.id), createConnection('c2', metadata.id, end.id)];
+        workflow.nodeModels = {
+            metadata: {
+                id: 'metadata',
+                fields: {
+                    prompt: {
+                        type: 'textarea',
+                        allowVariables: true
+                    }
+                }
+            }
+        };
+
+        let seenPrompt = '';
+        const executor = createWorkflowExecutor({
+            mode: WorkflowExecutorModeEnum.Local,
+            adapters: createAdapters({
+                start: async () => ({ output: { answer: '42', __activeOutputs: ['output'] }, status: WorkflowNodeStatusEnum.Passed }),
+                metadata: async (node) => {
+                    seenPrompt = String(node.runtime.prompt ?? '');
+                    return { output: { prompt: seenPrompt }, status: WorkflowNodeStatusEnum.Passed };
+                },
+                'respond-end': async (_node, input) => ({ output: { input }, status: WorkflowNodeStatusEnum.Passed })
+            })
+        });
+
+        const result = await executor.executeWorkflow(workflow, { settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        const metadataAfter = result.workflow.nodes.find((item) => item.id === metadata.id);
+        expect(seenPrompt).toBe('Use 42');
+        expect(metadataAfter?.status).toBe(WorkflowNodeStatusEnum.Passed);
+    });
+
+    it('fails workflow node when variable token is unresolved', async () => {
+        const workflow = createWorkflow();
+        const start = createStartNode(1);
+        const metadata = createMetadataNode(2, 'Broken Variable');
+        const end = createEndNode(3);
+        metadata.runtime = { prompt: 'Use {{input.node_start_1.output.missing}}' };
+        workflow.nodes = [start, metadata, end];
+        workflow.connections = [createConnection('c1', start.id, metadata.id), createConnection('c2', metadata.id, end.id)];
+        workflow.nodeModels = {
+            metadata: {
+                id: 'metadata',
+                fields: {
+                    prompt: {
+                        type: 'textarea',
+                        allowVariables: true
+                    }
+                }
+            }
+        };
+
+        const executor = createWorkflowExecutor({
+            mode: WorkflowExecutorModeEnum.Local,
+            adapters: createAdapters({
+                start: async () => ({ output: { ok: true, __activeOutputs: ['output'] }, status: WorkflowNodeStatusEnum.Passed }),
+                metadata: async () => ({ output: { ok: true }, status: WorkflowNodeStatusEnum.Passed })
+            })
+        });
+
+        const result = await executor.executeWorkflow(workflow, { settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        const metadataAfter = result.workflow.nodes.find((item) => item.id === metadata.id);
+        expect(metadataAfter?.status).toBe(WorkflowNodeStatusEnum.Failed);
+        expect(result.events.some((event) => event.event === 'node.failed' && event.nodeId === metadata.id)).toBe(true);
+    });
+
+    it('fails when variable token is used in disallowed field', async () => {
+        const workflow = createWorkflow();
+        const start = createStartNode(1);
+        const metadata = createMetadataNode(2, 'Disallowed Variable');
+        const end = createEndNode(3);
+        metadata.runtime = { queryLimit: '{{input.node_start_1.output.count}}' };
+        workflow.nodes = [start, metadata, end];
+        workflow.connections = [createConnection('c1', start.id, metadata.id), createConnection('c2', metadata.id, end.id)];
+        workflow.nodeModels = {
+            metadata: {
+                id: 'metadata',
+                fields: {
+                    queryLimit: {
+                        type: 'number',
+                        allowVariables: false
+                    }
+                }
+            }
+        };
+
+        const executor = createWorkflowExecutor({
+            mode: WorkflowExecutorModeEnum.Local,
+            adapters: createAdapters({
+                start: async () => ({ output: { count: 2, __activeOutputs: ['output'] }, status: WorkflowNodeStatusEnum.Passed }),
+                metadata: async () => ({ output: { ok: true }, status: WorkflowNodeStatusEnum.Passed })
+            })
+        });
+
+        const result = await executor.executeWorkflow(workflow, { settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        const metadataAfter = result.workflow.nodes.find((item) => item.id === metadata.id);
+        expect(metadataAfter?.status).toBe(WorkflowNodeStatusEnum.Failed);
+    });
+});

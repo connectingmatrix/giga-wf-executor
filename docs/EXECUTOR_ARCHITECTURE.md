@@ -12,6 +12,7 @@ This document is intentionally verbose. It is designed so AI agents and engineer
 - `src/node-core/viewers.ts`
 - `src/executor/jsonl-logger.ts`
 - `src/executor/failure-mitigation.ts`
+- `src/executor/variables.ts`
 - `src/executor/workflow-runner.ts`
 - `src/executor/step-runner.ts`
 - `src/executor/create-workflow-executor.ts`
@@ -27,7 +28,7 @@ Key groups:
 
 - Enums for node status, viewer type, log level, executor mode.
 - Core graph types: `WorkflowDefinition`, `WorkflowNodeModel`, `WorkflowConnectionModel`.
-  - `WorkflowDefinition` no longer requires `nodeModels`.
+  - `WorkflowDefinition` supports optional `nodeModels` for schema-aware runtime behavior (for example variable permission checks).
   - `WorkflowNodeModel` uses `runtime` (flat key/value) and `ports.in`/`ports.out`.
 - Runtime types: `WorkflowRuntimeSettings`, `WorkflowRunLogEvent`.
 - Handler contracts:
@@ -168,6 +169,11 @@ Major stages:
    - `failureMitigation=stop-workflow` fails immediately.
    - Retry-attempt logs stream as `node.log` during run.
    - Workflow run exits without `workflow.completed` when terminal node failure occurs.
+10. Variable resolution layer:
+   - resolves runtime token values (for example {{input.node_id.output.key}}) before handler execution.
+   - unresolved or disallowed tokens fail node before handler invocation.
+   - disallowed enforcement reads optional schema flag workflow.nodeModels[modelId].fields[field].allowVariables.
+   - resolved values are execution-local and do not rewrite canonical persisted runtime config.
 
 ### `src/executor/step-runner.ts`
 
@@ -187,6 +193,9 @@ Major stages:
 6. Apply the same failure mitigation contract as DAG runs:
    - retries on thrown errors or failed statuses,
    - aggregate retry logs into returned step result logs.
+7. Apply the same variable resolution contract as DAG runs:
+   - resolve runtime template tokens before node handler invocation,
+   - fail node immediately for unresolved/disallowed tokens with structured error output.
 
 ### `src/executor/failure-mitigation.ts`
 
@@ -200,6 +209,19 @@ Functions:
 - `resolveResultStatus(...)`
 - `resolveFailureMessageFromResult(...)`
 - `buildRetryAttemptLog(...)`
+
+### `src/executor/variables.ts`
+
+Purpose: Shared runtime template-variable resolution and schema permission enforcement.
+
+Functions:
+
+- `resolveNodeRuntimeVariables(...)`
+  - resolves {{...}} tokens against execution context.
+  - validates unresolved tokens.
+  - validates disallowed usage via schema allowVariables flags when schema exists.
+- `formatVariableFailureMessage(...)`
+  - builds deterministic failure message for logs and node error output.
 
 ### `src/executor/create-workflow-executor.ts`
 

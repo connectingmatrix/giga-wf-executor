@@ -80,6 +80,189 @@ var resolveFailureMessageFromResult = (result, fallbackMessage = "Node execution
 };
 var buildRetryAttemptLog = (attemptNumber, retryLimit, errorMessage) => `Attempt ${attemptNumber} failed: ${errorMessage}. Retrying (${attemptNumber}/${retryLimit})...`;
 
+// src/executor/variables.ts
+var VARIABLE_TOKEN_REGEX = /\{\{\s*([^}]+?)\s*\}\}/g;
+var FULL_TOKEN_REGEX = /^\s*\{\{\s*([^}]+?)\s*\}\}\s*$/;
+var parseRecord2 = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+var normalizePath = (path) => path.replace(/\[(\d+)\]/g, ".$1").trim();
+var resolvePath = (path, context) => {
+  const normalized = normalizePath(path);
+  if (!normalized) return void 0;
+  const segments = normalized.split(".").filter(Boolean);
+  let current = context;
+  for (const segment of segments) {
+    if (!current || typeof current !== "object") return void 0;
+    current = current[segment];
+  }
+  return current;
+};
+var toReplacementString = (value) => {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value === null) return "null";
+  if (typeof value === "undefined") return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+var cloneValue = (value) => {
+  if (typeof value === "undefined") return value;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return value;
+  }
+};
+var resolveStringValue = (source, context) => {
+  const fullTokenMatch = source.match(FULL_TOKEN_REGEX);
+  if (fullTokenMatch) {
+    const fullPath = String(fullTokenMatch[1] ?? "").trim();
+    if (!fullPath) {
+      return { value: source, unresolvedPaths: [] };
+    }
+    const resolved = resolvePath(fullPath, context);
+    if (typeof resolved === "undefined") {
+      return { value: source, unresolvedPaths: [fullPath] };
+    }
+    if (typeof resolved === "number" || typeof resolved === "boolean" || resolved === null) {
+      return { value: String(resolved), unresolvedPaths: [] };
+    }
+    return { value: cloneValue(resolved), unresolvedPaths: [] };
+  }
+  const unresolvedPaths = [];
+  const value = source.replace(VARIABLE_TOKEN_REGEX, (token, rawPath) => {
+    const path = String(rawPath ?? "").trim();
+    if (!path) return token;
+    const resolved = resolvePath(path, context);
+    if (typeof resolved === "undefined") {
+      unresolvedPaths.push(path);
+      return token;
+    }
+    return toReplacementString(resolved);
+  });
+  return { value, unresolvedPaths };
+};
+var containsVariableToken = (value) => typeof value === "string" && /\{\{\s*[^}]+?\s*\}\}/.test(value);
+var resolveValue = (value, context) => {
+  if (typeof value === "string") {
+    return resolveStringValue(value, context);
+  }
+  if (Array.isArray(value)) {
+    const unresolvedPaths = [];
+    const nextValue = value.map((entry) => {
+      const next = resolveValue(entry, context);
+      unresolvedPaths.push(...next.unresolvedPaths);
+      return next.value;
+    });
+    return { value: nextValue, unresolvedPaths };
+  }
+  if (value && typeof value === "object") {
+    const unresolvedPaths = [];
+    const nextValue = Object.entries(value).reduce((acc, [key, entry]) => {
+      const next = resolveValue(entry, context);
+      unresolvedPaths.push(...next.unresolvedPaths);
+      acc[key] = next.value;
+      return acc;
+    }, {});
+    return { value: nextValue, unresolvedPaths };
+  }
+  return { value, unresolvedPaths: [] };
+};
+var buildInputVariableContext = (input) => {
+  const bySourceNode = Object.entries(input).reduce((acc, [portKey, sourceMap]) => {
+    const normalizedSourceMap = parseRecord2(sourceMap);
+    Object.entries(normalizedSourceMap).forEach(([sourceNodeId, sourceValue]) => {
+      const existing = parseRecord2(acc[sourceNodeId]);
+      acc[sourceNodeId] = {
+        ...existing,
+        output: cloneValue(sourceValue),
+        [portKey]: cloneValue(sourceValue)
+      };
+    });
+    return acc;
+  }, {});
+  return {
+    ...input,
+    ...bySourceNode
+  };
+};
+var resolveFieldAllowVariables = (workflow, node, fieldKey) => {
+  const schema = node.modelId ? workflow.nodeModels?.[node.modelId] : void 0;
+  if (!schema) return true;
+  const fields = parseRecord2(schema.fields);
+  const field = parseRecord2(fields[fieldKey]);
+  if (Object.keys(field).length === 0) return true;
+  if (typeof field.allowVariables === "boolean") return field.allowVariables;
+  const normalizedKey = fieldKey.trim().toLowerCase();
+  if (normalizedKey === "status" || normalizedKey === "source" || normalizedKey === "timestamp" || normalizedKey === "nodelibraryid") return false;
+  if (field.hidden === true || field.auto === true) return false;
+  if (field.type === "boolean" || field.type === "number" || field.type === "timestamp" || field.type === "file" || field.type === "file-list") return false;
+  return field.editable !== false;
+};
+var resolveNodeRuntimeVariables = (workflow, node, input) => {
+  const runtime = parseRecord2(node.runtime);
+  const context = {
+    input: buildInputVariableContext(input),
+    properties: runtime,
+    runtime,
+    node: {
+      id: node.id,
+      name: node.name,
+      modelId: node.modelId,
+      status: node.status
+    },
+    workflow: {
+      metadata: workflow.metadata,
+      status: "running" /* Running */
+    }
+  };
+  const failures = [];
+  const nextRuntime = Object.entries(runtime).reduce((acc, [field, value]) => {
+    const hasVariable = containsVariableToken(value) || (Array.isArray(value) ? value.some((item) => containsVariableToken(item)) : false);
+    const allowVariables = resolveFieldAllowVariables(workflow, node, field);
+    if (!allowVariables && hasVariable) {
+      const unresolved = resolveValue(value, context).unresolvedPaths;
+      if (unresolved.length > 0) {
+        unresolved.forEach((tokenPath) => failures.push({ field, tokenPath, reason: "disallowed" }));
+      } else if (typeof value === "string") {
+        for (const match of value.matchAll(VARIABLE_TOKEN_REGEX)) {
+          const tokenPath = String(match[1] ?? "").trim();
+          if (tokenPath) failures.push({ field, tokenPath, reason: "disallowed" });
+        }
+      }
+      acc[field] = value;
+      return acc;
+    }
+    if (!allowVariables) {
+      acc[field] = value;
+      return acc;
+    }
+    const resolved = resolveValue(value, context);
+    resolved.unresolvedPaths.forEach((tokenPath) => failures.push({ field, tokenPath, reason: "unresolved" }));
+    acc[field] = resolved.value;
+    return acc;
+  }, {});
+  return {
+    ok: failures.length === 0,
+    runtime: nextRuntime,
+    failures
+  };
+};
+var formatVariableFailureMessage = (failures, nodeName) => {
+  const unique = Array.from(new Set(failures.map((failure) => `${failure.field}:${failure.tokenPath}:${failure.reason}`)));
+  const reasons = unique.slice(0, 6).map((entry) => {
+    const [field, tokenPath, reason] = entry.split(":");
+    if (reason === "disallowed") {
+      return `Field "${field}" does not allow variable token "${tokenPath}".`;
+    }
+    return `Unable to resolve variable token "${tokenPath}" in field "${field}".`;
+  });
+  const overflow = unique.length > reasons.length ? ` (+${unique.length - reasons.length} more)` : "";
+  return `Variable resolution failed for node "${nodeName}": ${reasons.join(" ")}${overflow}`.trim();
+};
+
 // src/executor/step-runner.ts
 var toPortsOut = (node) => node.ports?.out && typeof node.ports.out === "object" ? node.ports.out : {};
 var toPortsIn = (node) => node.ports?.in && typeof node.ports.in === "object" ? node.ports.in : {};
@@ -129,6 +312,27 @@ var executeNodeStepWithContext = async (runtime, options) => {
     const retryLimit = resolveFailureRetryLimit(runningNode);
     const retryAttemptLogs = [];
     const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
+    const variableResolution = resolveNodeRuntimeVariables(workingWorkflow, runningNode, input);
+    if (!variableResolution.ok) {
+      const message = formatVariableFailureMessage(variableResolution.failures, runningNode.name);
+      const failedNode = buildFailedNodeState(runningNode, message);
+      workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
+      outputsByNode.set(runningNode.id, toPortsOut(failedNode));
+      emitNodeFailed(sink, options.workflow.metadata.id, runId, targetNodeId, message);
+      emitNodeLogs(sink, options.workflow.metadata.id, runId, targetNodeId, [message]);
+      return {
+        node: failedNode,
+        result: {
+          output: { error: message, variableFailures: variableResolution.failures },
+          status: "failed" /* Failed */,
+          logs: [message]
+        }
+      };
+    }
+    const executableNode = {
+      ...runningNode,
+      runtime: { ...runningNode.runtime ?? {}, ...variableResolution.runtime }
+    };
     try {
       if (!canRunLocally && !options.executeNodeRemotely) throw new Error(`Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`);
       for (let attemptNumber = 1; attemptNumber <= retryLimit + 1; attemptNumber += 1) {
@@ -163,9 +367,9 @@ var executeNodeStepWithContext = async (runtime, options) => {
           emitNodeFinished(sink, options.workflow.metadata.id, runId, runningNode.id, remoteNode.status, durationMs2, terminalLogs2);
           return { node: remoteNode, result: { ...remoteExecution.result, status: remoteNode.status, logs: [...retryAttemptLogs, ...terminalLogs2] } };
         }
-        const handler = runtime.adapters.getNodeHandler(runningNode.modelId);
+        const handler = runtime.adapters.getNodeHandler(executableNode.modelId);
         const result = await handler({
-          node: { ...runningNode, ports: { ...runningNode.ports, in: input } },
+          node: { ...executableNode, ports: { ...executableNode.ports, in: input } },
           workflow: workingWorkflow,
           settings: options.settings,
           input,
@@ -277,13 +481,38 @@ var executeWorkflowWithContext = async (runtime, workflow, options) => {
     currentWorkflow = replaceNodeById(currentWorkflow, runningNode);
     options.onNodeStart?.(runningNode.id);
     emitNodeStarted(sink, workflow.metadata.id, runId, runningNode);
-    const handler = runtime.adapters.getNodeHandler(runningNode.modelId);
     const input = overrideInput ?? buildNodeInputContext(currentWorkflow, runningNode.id, outputsByNode, toPortsIn2(runningNode));
     const startedAt = (/* @__PURE__ */ new Date()).toISOString();
     const startedAtMs = performance.now();
     const retryLimit = resolveFailureRetryLimit(runningNode);
     const retryAttemptLogs = [];
     const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
+    const variableResolution = resolveNodeRuntimeVariables(currentWorkflow, runningNode, input);
+    if (!variableResolution.ok) {
+      const message = formatVariableFailureMessage(variableResolution.failures, runningNode.name);
+      const failedNode = buildFailedNodeState(runningNode, message);
+      currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
+      outputsByNode.set(failedNode.id, toPortsOut2(failedNode));
+      const finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+      const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
+      nodeExecutionTimings[runningNode.id] = createNodeExecutionTiming(failedNode, "failed" /* Failed */, startedAt, finishedAt, durationMs);
+      emitNodeFailed(sink, workflow.metadata.id, runId, runningNode.id, message);
+      emitNodeLogs(sink, workflow.metadata.id, runId, runningNode.id, [message]);
+      options.onNodeFinish?.(failedNode);
+      return {
+        node: failedNode,
+        result: {
+          output: { error: message, variableFailures: variableResolution.failures },
+          status: "failed" /* Failed */,
+          logs: [message]
+        }
+      };
+    }
+    const executableNode = {
+      ...runningNode,
+      runtime: { ...runningNode.runtime ?? {}, ...variableResolution.runtime }
+    };
+    const handler = runtime.adapters.getNodeHandler(executableNode.modelId);
     if (!canRunLocally && !options.executeNodeRemotely) {
       const message = `Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`;
       const failedNode = buildFailedNodeState(runningNode, message);
@@ -339,7 +568,7 @@ var executeWorkflowWithContext = async (runtime, workflow, options) => {
           return { node: remoteNode, result: { ...remoteExecution.result, status: remoteNode.status, logs: logs2 } };
         }
         const result = await handler({
-          node: { ...runningNode, ports: { ...runningNode.ports, in: input } },
+          node: { ...executableNode, ports: { ...executableNode.ports, in: input } },
           workflow: currentWorkflow,
           settings: options.settings,
           input,
@@ -422,7 +651,6 @@ var executeWorkflowWithContext = async (runtime, workflow, options) => {
     currentWorkflow = replaceNodeById(currentWorkflow, runningNode);
     options.onNodeStart?.(node.id);
     emitNodeStarted(sink, workflow.metadata.id, runId, runningNode);
-    const handler = runtime.adapters.getNodeHandler(node.modelId);
     let input = buildNodeInputContext(currentWorkflow, node.id, outputsByNode, toPortsIn2(runningNode));
     if (runningNode.modelId === END_MODEL_ID) input = { ...input, __workflow: buildWorkflowSummaryInput(runId, new Map(outputsByNode.entries()), nodeExecutionTimings, includeLogsInSummary ? events : []) };
     const startedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -430,6 +658,24 @@ var executeWorkflowWithContext = async (runtime, workflow, options) => {
     const retryLimit = resolveFailureRetryLimit(runningNode);
     const retryAttemptLogs = [];
     const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
+    const variableResolution = resolveNodeRuntimeVariables(currentWorkflow, runningNode, input);
+    if (!variableResolution.ok) {
+      const message = formatVariableFailureMessage(variableResolution.failures, runningNode.name);
+      const failedNode = buildFailedNodeState(runningNode, message);
+      currentWorkflow = replaceNodeById(currentWorkflow, failedNode);
+      outputsByNode.set(node.id, toPortsOut2(failedNode));
+      const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
+      nodeExecutionTimings[node.id] = createNodeExecutionTiming(failedNode, "failed" /* Failed */, startedAt, (/* @__PURE__ */ new Date()).toISOString(), durationMs);
+      emitNodeFailed(sink, workflow.metadata.id, runId, node.id, message);
+      emitNodeLogs(sink, workflow.metadata.id, runId, node.id, [message]);
+      options.onNodeFinish?.(failedNode);
+      return { workflow: currentWorkflow, stopped: false, events };
+    }
+    const executableNode = {
+      ...runningNode,
+      runtime: { ...runningNode.runtime ?? {}, ...variableResolution.runtime }
+    };
+    const handler = runtime.adapters.getNodeHandler(executableNode.modelId);
     try {
       if (!canRunLocally && !options.executeNodeRemotely) throw new Error(`Node model "${runningNode.modelId}" requires server execution in "${runtime.mode}" mode.`);
       for (let attemptNumber = 1; attemptNumber <= retryLimit + 1; attemptNumber += 1) {
@@ -474,7 +720,7 @@ var executeWorkflowWithContext = async (runtime, workflow, options) => {
           break;
         }
         const result = await handler({
-          node: { ...runningNode, ports: { ...runningNode.ports, in: input } },
+          node: { ...executableNode, ports: { ...executableNode.ports, in: input } },
           workflow: currentWorkflow,
           settings: options.settings,
           input,
