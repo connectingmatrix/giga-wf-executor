@@ -31,6 +31,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts src/types/index.ts src/node-core/index.ts --format cjs,esm --dts --outDir dist --clean",
+    "prepare": "yarn build",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
