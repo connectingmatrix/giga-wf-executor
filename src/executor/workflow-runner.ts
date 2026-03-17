@@ -5,6 +5,7 @@ import { buildCompletedNodeState, buildFailedNodeState, buildRunningNodeState, m
 import { buildWorkflowSummaryInput, createNodeExecutionTiming, WorkflowNodeExecutionTimingMap } from '../node-core/summary';
 import { buildRetryAttemptLog, resolveFailureMessageFromResult, resolveFailureRetryLimit, resolveResultStatus } from './failure-mitigation';
 import { formatVariableFailureMessage, resolveNodeRuntimeVariables } from './variables';
+import { validateWorkflowConnectionCompatibility } from './port-compatibility';
 
 const START_MODEL_ID = 'start';
 const END_MODEL_ID = 'respond-end';
@@ -49,6 +50,14 @@ export const executeWorkflowWithContext = async (runtime: WorkflowRunnerContext,
     if (startNodeIds.length === 0 || !hasEndNode) {
         const missing = [startNodeIds.length === 0 ? 'Start node' : null, !hasEndNode ? 'Respond/End node' : null].filter((item): item is string => Boolean(item));
         emitWorkflowValidationFailed(sink, workflow.metadata.id, runId, `Workflow execution requires ${missing.join(' and ')}.`);
+        return { workflow: currentWorkflow, stopped: false, events };
+    }
+
+    const compatibilityViolations = validateWorkflowConnectionCompatibility(currentWorkflow);
+    if (compatibilityViolations.length > 0) {
+        const details = compatibilityViolations.map((item) => item.message).join(' ');
+        const message = `Workflow has incompatible connection(s): ${details}`;
+        emitWorkflowValidationFailed(sink, workflow.metadata.id, runId, message);
         return { workflow: currentWorkflow, stopped: false, events };
     }
 

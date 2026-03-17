@@ -106,6 +106,39 @@ describe('shared workflow step executor', () => {
         expect(result.node.status).toBe(WorkflowNodeStatusEnum.Failed);
         expect(result.result.logs).toContain('halt now');
     });
+
+    it('fails step execution when connection compatibility rules are violated', async () => {
+        const workflow = createWorkflow();
+        const nonModelNode = createMetadataNode(1, 'Non Model');
+        const governorNode = createMetadataNode(2, 'AI Governor');
+        governorNode.modelId = 'ai-governor';
+        workflow.nodes = [nonModelNode, governorNode];
+        workflow.connections = [createConnection('c1', nonModelNode.id, governorNode.id, 'out:output', 'in:modelIn')];
+        workflow.nodeModels = {
+            metadata: {
+                id: 'metadata',
+                group: 'Data',
+                inputs: { input: { allowMultipleArrows: true } },
+                outputs: { output: { allowMultipleArrows: true } }
+            },
+            'ai-governor': {
+                id: 'ai-governor',
+                inputs: {
+                    modelIn: {
+                        allowMultipleArrows: true,
+                        acceptedSourceGroups: ['AI Models']
+                    },
+                    input: { allowMultipleArrows: true }
+                },
+                outputs: { output: { allowMultipleArrows: true } }
+            }
+        };
+
+        const executor = createWorkflowExecutor({ mode: WorkflowExecutorModeEnum.Local, adapters: createAdapters({}) });
+        const result = await executor.executeNodeStep({ workflow, nodeId: governorNode.id, settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        expect(result.node.status).toBe(WorkflowNodeStatusEnum.Failed);
+        expect(String(result.result.logs?.[0] ?? '')).toContain('incompatible connection');
+    });
 });
 
 describe('step variable resolution', () => {

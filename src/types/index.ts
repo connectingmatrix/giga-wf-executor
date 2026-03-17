@@ -76,6 +76,8 @@ export interface WorkflowConnectionModel {
 }
 
 export interface WorkflowNodeFieldSchema {
+    aiWriteMode?: 'allow' | 'connected-options-only' | 'deny';
+    aiSourcePort?: string;
     allowVariables?: boolean;
     hidden?: boolean;
     auto?: boolean;
@@ -84,9 +86,22 @@ export interface WorkflowNodeFieldSchema {
     [key: string]: unknown;
 }
 
+export interface WorkflowNodePortSchema {
+    allowMultipleArrows?: boolean;
+    side?: string;
+    order?: number;
+    label?: string;
+    portType?: string;
+    acceptedSourceGroups?: string[];
+    acceptedSourceModelIds?: string[];
+    [key: string]: unknown;
+}
+
 export interface WorkflowNodeSchema {
     id?: string;
     fields?: Record<string, WorkflowNodeFieldSchema>;
+    inputs?: Record<string, WorkflowNodePortSchema>;
+    outputs?: Record<string, WorkflowNodePortSchema>;
     [key: string]: unknown;
 }
 

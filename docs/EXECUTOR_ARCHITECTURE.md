@@ -13,6 +13,7 @@ This document is intentionally verbose. It is designed so AI agents and engineer
 - `src/executor/jsonl-logger.ts`
 - `src/executor/failure-mitigation.ts`
 - `src/executor/variables.ts`
+- `src/executor/port-compatibility.ts`
 - `src/executor/workflow-runner.ts`
 - `src/executor/step-runner.ts`
 - `src/executor/create-workflow-executor.ts`
@@ -157,19 +158,20 @@ Entry:
 Major stages:
 
 1. Validate Start + Respond/End presence.
-2. Build reachable node set and topological order.
-3. Execute nodes in DAG order.
-4. Handle local-or-remote execution policy per node.
-5. Support nested connected-node invocation for orchestration nodes.
-6. Emit lifecycle events and timing metrics via `onEvent`.
-7. Inject workflow summary into end node input.
-8. Abort handling with `stopped` transition.
-9. Failure mitigation at shared-runner layer:
+2. Validate schema-aware connection compatibility (when `nodeModels` metadata exists).
+3. Build reachable node set and topological order.
+4. Execute nodes in DAG order.
+5. Handle local-or-remote execution policy per node.
+6. Support nested connected-node invocation for orchestration nodes.
+7. Emit lifecycle events and timing metrics via `onEvent`.
+8. Inject workflow summary into end node input.
+9. Abort handling with `stopped` transition.
+10. Failure mitigation at shared-runner layer:
    - `failureMitigation=retry-node` retries failed attempts (`retryCount` clamped `1..6`).
    - `failureMitigation=stop-workflow` fails immediately.
    - Retry-attempt logs stream as `node.log` during run.
    - Workflow run exits without `workflow.completed` when terminal node failure occurs.
-10. Variable resolution layer:
+11. Variable resolution layer:
    - resolves runtime token values (for example {{input.node_id.output.key}}) before handler execution.
    - unresolved or disallowed tokens fail node before handler invocation.
    - disallowed enforcement reads optional schema flag workflow.nodeModels[modelId].fields[field].allowVariables.
@@ -186,16 +188,29 @@ Entry:
 Major stages:
 
 1. Resolve target node and apply overrides.
-2. Transition target to running state.
-3. Build input context from upstream outputs.
-4. Execute local or remote.
-5. Persist status/output and lifecycle events.
-6. Apply the same failure mitigation contract as DAG runs:
+2. Validate schema-aware connection compatibility (when `nodeModels` metadata exists).
+3. Transition target to running state.
+4. Build input context from upstream outputs.
+5. Execute local or remote.
+6. Persist status/output and lifecycle events.
+7. Apply the same failure mitigation contract as DAG runs:
    - retries on thrown errors or failed statuses,
    - aggregate retry logs into returned step result logs.
-7. Apply the same variable resolution contract as DAG runs:
+8. Apply the same variable resolution contract as DAG runs:
    - resolve runtime template tokens before node handler invocation,
    - fail node immediately for unresolved/disallowed tokens with structured error output.
+
+### `src/executor/port-compatibility.ts`
+
+Purpose: Shared schema-driven graph compatibility validation used by both run and step paths.
+
+Function:
+
+- `validateWorkflowConnectionCompatibility(workflow)`
+  - Checks connection source/target existence.
+  - Applies compatibility enforcement only when schema metadata is available.
+  - Enforces target constraints (`acceptedSourceGroups`, `acceptedSourceModelIds`) and multiplicity (`allowMultipleArrows`) for declared ports.
+  - Returns deterministic violation messages for host-level failure reporting.
 
 ### `src/executor/failure-mitigation.ts`
 

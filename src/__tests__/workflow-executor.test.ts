@@ -158,6 +158,47 @@ describe('shared workflow executor', () => {
         expect(failingAfter?.status).toBe(WorkflowNodeStatusEnum.Failed);
         expect(result.events.some((event) => event.event === 'workflow.completed')).toBe(false);
     });
+
+    it('fails workflow when connection compatibility rules are violated', async () => {
+        const workflow = createWorkflow();
+        const start = createStartNode(1);
+        const nonModelNode = createMetadataNode(2, 'Non Model');
+        const governor = createMetadataNode(3, 'AI Governor');
+        const end = createEndNode(4);
+        governor.modelId = 'ai-governor';
+        workflow.nodes = [start, nonModelNode, governor, end];
+        workflow.connections = [
+            createConnection('c1', start.id, nonModelNode.id),
+            createConnection('c2', nonModelNode.id, governor.id, 'out:output', 'in:modelIn'),
+            createConnection('c3', governor.id, end.id)
+        ];
+        workflow.nodeModels = {
+            metadata: {
+                id: 'metadata',
+                group: 'Data',
+                inputs: { input: { allowMultipleArrows: true } },
+                outputs: { output: { allowMultipleArrows: true } }
+            },
+            'ai-governor': {
+                id: 'ai-governor',
+                inputs: {
+                    modelIn: {
+                        allowMultipleArrows: true,
+                        acceptedSourceGroups: ['AI Models']
+                    },
+                    input: { allowMultipleArrows: true }
+                },
+                outputs: { output: { allowMultipleArrows: true } }
+            }
+        };
+
+        const executor = createWorkflowExecutor({ mode: WorkflowExecutorModeEnum.Local, adapters: createAdapters({}) });
+        const result = await executor.executeWorkflow(workflow, { settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+
+        expect(result.events.some((event) => event.event === 'workflow.validation_failed')).toBe(true);
+        const validationEvent = result.events.find((event) => event.event === 'workflow.validation_failed');
+        expect(String(validationEvent?.message ?? '')).toContain('incompatible connection');
+    });
 });
 
 describe('workflow variable resolution', () => {

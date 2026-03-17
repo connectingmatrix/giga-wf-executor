@@ -31,8 +31,7 @@ import { createWorkflowExecutor, WorkflowExecutorModeEnum } from '@workflow/exec
 const executor = createWorkflowExecutor({
   mode: WorkflowExecutorModeEnum.Local,
   adapters: {
-    getNodeHandler: (modelId) => myNodeHandlerRegistry[modelId ?? 'default'],
-    resolveNodeSchema: (modelId, nodeModels) => nodeModels[modelId ?? 'unknown']
+    getNodeHandler: (modelId) => myNodeHandlerRegistry[modelId ?? 'default']
   }
 });
 ```
@@ -109,6 +108,28 @@ Behavior:
   - disallowed token usage fails node before handler call.
   - if schema is missing, fallback is allow.
 - Runtime resolution is execution-only; it does not overwrite canonical stored node configuration.
+
+## Port Compatibility Validation
+
+Shared executor validates connection compatibility before run and step execution when `workflow.nodeModels` metadata is present.
+
+Supported input-port schema keys:
+
+- `portType`
+- `acceptedSourceGroups`
+- `acceptedSourceModelIds`
+- `allowMultipleArrows`
+
+Behavior:
+
+- Validation is schema-driven and backward-compatible:
+  - if `nodeModels` is missing, execution remains permissive.
+  - if a source/target model schema is missing, that edge is treated permissively.
+- When both source and target schemas are present, the executor enforces:
+  - declared source/target port existence,
+  - accepted source model/group constraints,
+  - source/target multiplicity rules.
+- On violation, execution fails early with `workflow.validation_failed` (run path) or failed step output (step path).
 
 ## Local development
 

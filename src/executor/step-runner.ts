@@ -4,6 +4,7 @@ import { buildCompletedNodeState, buildFailedNodeState, buildRunningNodeState, r
 import { ExecuteNodeStepOptions, WorkflowDefinition, WorkflowExecutorAdapters, WorkflowExecutorMode, WorkflowNodeHandlerResult, WorkflowNodeModel, WorkflowNodeStatusEnum, WorkflowRunLogEvent, WorkflowStepExecutorResult } from '../types';
 import { buildRetryAttemptLog, resolveFailureMessageFromResult, resolveFailureRetryLimit, resolveResultStatus } from './failure-mitigation';
 import { formatVariableFailureMessage, resolveNodeRuntimeVariables } from './variables';
+import { validateWorkflowConnectionCompatibility } from './port-compatibility';
 
 export interface WorkflowStepRunnerContext {
     mode: WorkflowExecutorMode;
@@ -42,6 +43,26 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
     const outputsByNode = new Map<string, Record<string, unknown>>();
     workingWorkflow.nodes.forEach((item) => outputsByNode.set(item.id, toPortsOut(item)));
     const executionStack = new Set<string>();
+
+    const compatibilityViolations = validateWorkflowConnectionCompatibility(workingWorkflow);
+    if (compatibilityViolations.length > 0) {
+        const details = compatibilityViolations.map((item) => item.message).join(' ');
+        const message = `Workflow has incompatible connection(s): ${details}`;
+        const targetNode = workingWorkflow.nodes.find((item) => item.id === options.nodeId);
+        if (!targetNode) {
+            throw new Error(`Node "${options.nodeId}" not found for step execution.`);
+        }
+        const failedNode = buildFailedNodeState(targetNode, message);
+        workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
+        emitNodeFailed(sink, options.workflow.metadata.id, runId, options.nodeId, message);
+        emitNodeLogs(sink, options.workflow.metadata.id, runId, options.nodeId, [message]);
+        return {
+            workflow: workingWorkflow,
+            node: failedNode,
+            result: { output: { error: message, connectionViolations: compatibilityViolations }, status: WorkflowNodeStatusEnum.Failed, logs: [message] },
+            events
+        };
+    }
 
     /** Purpose: recursively executes one node (and optionally connected nodes) while guarding against cycles in step mode. */
     const executeNodeById = async (targetNodeId: string, overrideInput?: Record<string, Record<string, unknown>>, nestedOverrides?: ExecuteNodeStepOptions['overrides']): Promise<{ node: WorkflowNodeModel; result: WorkflowNodeHandlerResult }> => {
