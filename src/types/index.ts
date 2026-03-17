@@ -118,6 +118,8 @@ export interface WorkflowMetadata {
 export interface WorkflowDefinition {
     metadata: WorkflowMetadata;
     nodeModels?: Record<string, WorkflowNodeSchema>;
+    NODE_EXECUTORS?: Record<string, string>;
+    NODE_EXECUTOR_SIGNATURES?: Record<string, string>;
     nodes: WorkflowNodeModel[];
     connections: WorkflowConnectionModel[];
 }
