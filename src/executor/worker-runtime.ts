@@ -34,16 +34,9 @@ interface GlobalWorkerHelpers {
     __WF_EXECUTE_HELPERS__?: Record<string, WorkerExecuteHelpers>;
 }
 
-interface WorkerSession {
-    signature: string;
-    scopesByNodeId: Map<string, Record<string, unknown>>;
-    initialized: boolean;
-}
-
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 const globalWorkerHelpers = globalThis as typeof globalThis & GlobalWorkerHelpers;
-const workerSessionByWorkflowId = new Map<string, WorkerSession>();
 const MAX_ON_UPDATE_REENTRY = 6;
 
 const toRecord = (value: unknown): Record<string, unknown> =>
@@ -251,62 +244,6 @@ const loadWorkerModule = async (params: {
     return workerModule as WorkerModule;
 };
 
-const resolveWorkflowSignature = (workflow: WorkflowDefinition): string => {
-    const nodeSignature = workflow.nodes.map((node) => `${node.id}:${node.modelId}`).join('|');
-    const edgeSignature = workflow.connections.map((connection) => connection.id).join('|');
-    return `${workflow.metadata.id}::${nodeSignature}::${edgeSignature}`;
-};
-
-const getOrCreateSession = (workflow: WorkflowDefinition): WorkerSession => {
-    const workflowId = String(workflow.metadata.id || 'workflow');
-    const signature = resolveWorkflowSignature(workflow);
-    const existing = workerSessionByWorkflowId.get(workflowId);
-    if (existing && existing.signature === signature) return existing;
-
-    const nextSession: WorkerSession = {
-        signature,
-        scopesByNodeId: new Map<string, Record<string, unknown>>(),
-        initialized: false
-    };
-    workerSessionByWorkflowId.set(workflowId, nextSession);
-    return nextSession;
-};
-
-const initializeWorkflowWorkers = async (params: {
-    context: WorkflowNodeHandlerContext;
-    helperId: string;
-    session: WorkerSession;
-}): Promise<void> => {
-    if (params.session.initialized) return;
-
-    for (const node of params.context.workflow.nodes) {
-        const nodeScope = params.session.scopesByNodeId.get(node.id) ?? {};
-        params.session.scopesByNodeId.set(node.id, nodeScope);
-
-        const module = await loadWorkerModule({
-            modelId: node.modelId,
-            workflow: params.context.workflow,
-            helperId: params.helperId
-        });
-
-        const nodePayload = {
-            workflow: params.context.workflow,
-            NODE_SCOPE: nodeScope,
-            NODE: toNodeFacade(node),
-            self: {
-                status: node.status,
-                PORTS: node.ports,
-                OUTPUT: null
-            }
-        };
-
-        await module.init(nodePayload);
-        await module.onUpdate(nodePayload);
-    }
-
-    params.session.initialized = true;
-};
-
 export const createWorkerNodeHandler = (args: {
     modelId: string;
     executeHelpers?: WorkerExecuteHelpers;
@@ -346,35 +283,24 @@ export const createWorkerNodeHandler = (args: {
         };
 
         try {
-            const session = getOrCreateSession(context.workflow);
-            const nodeScope = session.scopesByNodeId.get(context.node.id) ?? {};
-            session.scopesByNodeId.set(context.node.id, nodeScope);
-
-            await initializeWorkflowWorkers({
-                context,
-                helperId,
-                session
-            });
-
             const module = await loadWorkerModule({
                 modelId: args.modelId,
                 workflow: context.workflow,
                 helperId
             });
+            const nodeScope: Record<string, unknown> = {};
+            const initPayload = buildWorkerPayload(context, nodeScope, null);
 
-            const validationResult = normalizeValidationResult(
-                await module.validate(buildWorkerPayload(context, nodeScope, null))
-            );
+            await module.init(initPayload);
+            await module.onUpdate(initPayload);
 
+            const validationResult = normalizeValidationResult(await module.validate(buildWorkerPayload(context, nodeScope, null)));
             if (!validationResult.ok) {
                 const firstError = validationResult.errors[0] ?? `Worker validation failed for node "${context.node.name}".`;
                 return buildFailureResult(firstError, validationResult.warnings);
             }
 
-            const preUpdateResult = normalizeUpdateResult(
-                await module.onUpdate(buildWorkerPayload(context, nodeScope, null))
-            );
-
+            const preUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, null)));
             if (!preUpdateResult.ok) {
                 const message = preUpdateResult.error ?? `Worker onUpdate rejected node "${context.node.name}" before execute.`;
                 return buildFailureResult(message);
@@ -385,22 +311,13 @@ export const createWorkerNodeHandler = (args: {
 
             while (attempts < MAX_ON_UPDATE_REENTRY) {
                 attempts += 1;
-                result = normalizeWorkerResult(
-                    await module.execute(buildWorkerPayload(context, nodeScope, result.output ?? null))
-                );
-
-                const postUpdateResult = normalizeUpdateResult(
-                    await module.onUpdate(buildWorkerPayload(context, nodeScope, result.output ?? null))
-                );
-
+                result = normalizeWorkerResult(await module.execute(buildWorkerPayload(context, nodeScope, result.output ?? null)));
+                const postUpdateResult = normalizeUpdateResult(await module.onUpdate(buildWorkerPayload(context, nodeScope, result.output ?? null)));
                 if (postUpdateResult.ok) {
                     break;
                 }
-
                 if (attempts >= MAX_ON_UPDATE_REENTRY) {
-                    return buildFailureResult(
-                        `Worker execute reentry limit (${MAX_ON_UPDATE_REENTRY}) reached for node "${context.node.name}".`
-                    );
+                    return buildFailureResult(`Worker execute reentry limit (${MAX_ON_UPDATE_REENTRY}) reached for node "${context.node.name}".`);
                 }
             }
 
