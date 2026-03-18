@@ -154,6 +154,10 @@ export interface WorkflowNodeHandlerResult {
 
 export type WorkflowNodeHandler = (context: WorkflowNodeHandlerContext) => Promise<WorkflowNodeHandlerResult>;
 
+/**
+ * Descriptor for worker-authored backend execution:
+ * executeBackend({ service, function, description }, payload)
+ */
 export interface WorkflowExecuteBackendDescriptor {
     service: string;
     function: string;
@@ -167,8 +171,20 @@ export interface WorkflowExecuteBackendRequest {
     args: unknown[];
 }
 
+export interface WorkflowInvokeConnectedNodeRequest {
+    context: WorkflowNodeHandlerContext;
+    payload?: WorkflowInvokeConnectedNodeArgs;
+    args: unknown[];
+}
+
 export interface WorkerExecuteHelpers {
+    /**
+     * This will execute the backend service path, backend service function,
+     * and description of what that service does:
+     * executeBackend({ service, function, description }, payload)
+     */
     executeBackend?: (request: WorkflowExecuteBackendRequest) => Promise<WorkflowNodeHandlerResult>;
+    invokeConnectedNode?: (request: WorkflowInvokeConnectedNodeRequest) => Promise<{ node: WorkflowNodeModel; result: WorkflowNodeHandlerResult }>;
     updateNode?: (...args: unknown[]) => Promise<void> | void;
 }
 
@@ -263,6 +279,7 @@ export interface WorkerPayload {
     EXECUTOR: {
         environment: WorkerRuntimeEnvironment;
     };
+    HOST_CONTEXT?: unknown;
     NODE_SCOPE: WorkerScope;
     NODE: WorkerNodeFacade;
     self: WorkerSelfState;

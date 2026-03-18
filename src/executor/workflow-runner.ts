@@ -1,128 +1,21 @@
-import { ExecuteWorkflowOptions, WorkflowDefinition, WorkflowExecutorAdapters, WorkflowExecutorMode, WorkflowExecutorResult, WorkflowNodeModel, WorkflowNodeStatusEnum, WorkflowRunLogEvent, WorkflowStepOverrides } from '../types';
+import { ExecuteWorkflowOptions, WorkflowDefinition, WorkflowExecutorAdapters, WorkflowExecutorMode, WorkflowExecutorResult, WorkflowNodeStatusEnum, WorkflowStepOverrides } from '../types';
 import { buildNodeInputContext, collectReachableNodeIdsFromStartNodes, shouldExecuteNodeInCurrentRun, sortWorkflowNodesTopologically } from '../node-core/run-context';
-import { createRunId, emitNodeFailed, emitNodeFinished, emitNodeLogs, emitNodeStarted, emitWorkflowCompleted, emitWorkflowStopped, emitWorkflowValidationFailed, WorkflowEventSink } from '../node-core/log';
+import { createRunId, emitNodeFailed, emitNodeFinished, emitNodeLogs, emitNodeStarted, emitWorkflowCompleted, emitWorkflowStopped, emitWorkflowValidationFailed } from '../node-core/log';
 import { buildCompletedNodeState, buildFailedNodeState, buildRunningNodeState, markRunningNodesAsStopped, replaceNodeById } from '../node-core/state';
 import { buildWorkflowSummaryInput, createNodeExecutionTiming, WorkflowNodeExecutionTimingMap } from '../node-core/summary';
 import { buildRetryAttemptLog, resolveFailureMessageFromResult, resolveFailureRetryLimit, resolveResultStatus } from './failure-mitigation';
+import { createEventCollector, getBiPeerNodeIds, isNodeEnabled, normalizeNodeStatus, publishBiControlState, toPortsIn, toPortsOut, toRunnerRecord as toRecord, toRuntimeError } from './runner-helpers';
 import { formatVariableFailureMessage, resolveNodeRuntimeVariables } from './variables';
 import { validateWorkflowConnectionCompatibility } from './port-compatibility';
 
 const START_MODEL_ID = 'start';
 const END_MODEL_ID = 'respond-end';
-const BI_DIRECTIONAL_PORT_TYPE = 'bi-directional';
 
 export interface WorkflowRunnerContext {
     mode: WorkflowExecutorMode;
     adapters: WorkflowExecutorAdapters;
 }
-
-const isNodeEnabled = (node: WorkflowNodeModel): boolean => (typeof node.runtime?.enabled === 'boolean' ? node.runtime.enabled : true);
 const shouldForwardLogs = (workflow: WorkflowDefinition): boolean => workflow.nodes.some((node) => node.modelId === START_MODEL_ID && node.runtime?.forwardSessionLogs === true);
-const toPortsOut = (node: WorkflowNodeModel): Record<string, unknown> => (node.ports?.out && typeof node.ports.out === 'object' ? node.ports.out : {});
-const toPortsIn = (node: WorkflowNodeModel): Record<string, Record<string, unknown>> => (node.ports?.in && typeof node.ports.in === 'object' ? node.ports.in : {});
-const toRecord = (value: unknown): Record<string, unknown> => (value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
-const toRuntimeError = (node: WorkflowNodeModel): string | null => {
-    const runtime = node.runtime;
-    if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) return null;
-    const candidate = (runtime as Record<string, unknown>).error;
-    return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate.trim() : null;
-};
-const normalizeNodeStatus = (node: WorkflowNodeModel, status: string): WorkflowNodeModel => {
-    if (node.status === status && node.runtime?.status === status) return node;
-    return { ...node, status: status as WorkflowNodeStatusEnum, runtime: { ...(node.runtime ?? {}), status } };
-};
-
-const getBiOutputPortIds = (workflow: WorkflowDefinition, node: WorkflowNodeModel): string[] => {
-    const schema = workflow.nodeModels?.[node.modelId];
-    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];
-    const outputs = (schema.outputs && typeof schema.outputs === 'object' && !Array.isArray(schema.outputs) ? schema.outputs : {}) as Record<string, { portType?: unknown }>;
-    return Object.entries(outputs)
-        .filter(([, rules]) => rules?.portType === BI_DIRECTIONAL_PORT_TYPE)
-        .map(([portId]) => portId);
-};
-
-const publishBiControlState = (workflow: WorkflowDefinition, node: WorkflowNodeModel): WorkflowNodeModel => {
-    const biOutputPortIds = getBiOutputPortIds(workflow, node);
-    if (biOutputPortIds.length === 0) return node;
-    const nextPortsOut = toRecord(node.ports?.out);
-    const controlState = {
-        nodeId: node.id,
-        nodeName: node.name,
-        modelId: node.modelId,
-        status: node.status,
-        runtime: toRecord(node.runtime),
-        output: nextPortsOut.output ?? null
-    };
-    biOutputPortIds.forEach((portId) => {
-        const existingPortValue = toRecord(nextPortsOut[portId]);
-        nextPortsOut[portId] = {
-            ...existingPortValue,
-            STATE: controlState
-        };
-    });
-    return {
-        ...node,
-        ports: {
-            in: toPortsIn(node),
-            out: nextPortsOut
-        }
-    };
-};
-
-const parsePortName = (handle: string | undefined, fallbackPort: string): string => {
-    if (!handle) return fallbackPort;
-    const [, parsedPort] = handle.split(':');
-    return parsedPort?.trim() ? parsedPort : fallbackPort;
-};
-
-const getOutputPortType = (workflow: WorkflowDefinition, nodeId: string, handle: string | undefined): string | undefined => {
-    const node = workflow.nodes.find((item) => item.id === nodeId);
-    if (!node) return undefined;
-    const schema = workflow.nodeModels?.[node.modelId];
-    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
-    const outputs = (schema.outputs && typeof schema.outputs === 'object' && !Array.isArray(schema.outputs) ? schema.outputs : {}) as Record<string, { portType?: unknown }>;
-    const fallbackPort = Object.keys(outputs)[0] ?? 'output';
-    const portName = parsePortName(handle, fallbackPort);
-    return outputs[portName]?.portType as string | undefined;
-};
-
-const getInputPortType = (workflow: WorkflowDefinition, nodeId: string, handle: string | undefined): string | undefined => {
-    const node = workflow.nodes.find((item) => item.id === nodeId);
-    if (!node) return undefined;
-    const schema = workflow.nodeModels?.[node.modelId];
-    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
-    const inputs = (schema.inputs && typeof schema.inputs === 'object' && !Array.isArray(schema.inputs) ? schema.inputs : {}) as Record<string, { portType?: unknown }>;
-    const fallbackPort = Object.keys(inputs)[0] ?? 'input';
-    const portName = parsePortName(handle, fallbackPort);
-    return inputs[portName]?.portType as string | undefined;
-};
-
-const isBiConnection = (workflow: WorkflowDefinition, connection: WorkflowDefinition['connections'][number]): boolean => {
-    const sourcePortType = getOutputPortType(workflow, connection.from, connection.sourceHandle);
-    const targetPortType = getInputPortType(workflow, connection.to, connection.targetHandle);
-    return sourcePortType === BI_DIRECTIONAL_PORT_TYPE && targetPortType === BI_DIRECTIONAL_PORT_TYPE;
-};
-
-const getBiPeerNodeIds = (workflow: WorkflowDefinition, nodeId: string): string[] => {
-    const peers = new Set<string>();
-    workflow.connections.forEach((connection) => {
-        if (!isBiConnection(workflow, connection)) return;
-        if (connection.from === nodeId) peers.add(connection.to);
-        if (connection.to === nodeId) peers.add(connection.from);
-    });
-    peers.delete(nodeId);
-    return [...peers];
-};
-
-const createEventCollector = (options: ExecuteWorkflowOptions): { events: WorkflowRunLogEvent[]; sink: WorkflowEventSink } => {
-    const events: WorkflowRunLogEvent[] = [];
-    const sink: WorkflowEventSink = (event) => {
-        const withTimestamp: WorkflowRunLogEvent = { ...event, timestamp: new Date().toISOString() };
-        events.push(withTimestamp);
-        options.onEvent?.(withTimestamp);
-    };
-    return { events, sink };
-};
 
 /** Purpose: executes the whole DAG once using canonical runtime+ports state and emits lifecycle events via callback. */
 export const executeWorkflowWithContext = async (runtime: WorkflowRunnerContext, workflow: WorkflowDefinition, options: ExecuteWorkflowOptions): Promise<WorkflowExecutorResult> => {

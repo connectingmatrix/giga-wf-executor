@@ -17,18 +17,24 @@ import {
     WorkflowNodePorts,
     WorkflowNodeStatusEnum
 } from '../types';
+import {
+    createExecuteBackendHelper,
+    createInvokeConnectedNodeHelper,
+    createUpdateNodeHelper,
+    globalWorkerHelpers
+} from './worker-helper-bindings';
+import {
+    createBrowserNodeBuiltinStubSource,
+    createVirtualExecuteModuleSource,
+    createVirtualExecutorModuleSource
+} from './worker-virtual-modules';
 
 type TypeScriptModuleApi = typeof import('typescript');
-
-interface GlobalWorkerHelpers {
-    __WF_EXECUTE_HELPERS__?: Record<string, WorkerExecuteHelpers>;
-}
 
 type TypeScriptModuleLoader = () => Promise<unknown>;
 
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
-const globalWorkerHelpers = globalThis as typeof globalThis & GlobalWorkerHelpers;
 const MAX_ON_UPDATE_REENTRY = 6;
 const compiledWorkerSourceBySignature = new Map<string, string>();
 const WORKER_NODE_BUILTIN_STUB_SPECIFIER = '@workflow/node-builtin-stub';
@@ -172,6 +178,13 @@ const buildWorkerPayload = (
     nodeOverride?: WorkflowNodeModel
 ): WorkerPayload => {
     const node = nodeOverride ?? context.node;
+    const executionNode: WorkflowNodeModel = {
+        ...node,
+        ports: {
+            in: Object.keys(context.input ?? {}).length > 0 ? context.input : toRecord<WorkflowNodePorts['in']>(node.ports?.in),
+            out: toRecord<WorkflowNodePorts['out']>(node.ports?.out)
+        }
+    };
     const workflowMetadata: WorkflowDefinition['metadata'] = {
         ...(context.workflow.metadata ?? {}),
         runtime: {
@@ -189,11 +202,12 @@ const buildWorkerPayload = (
         EXECUTOR: {
             environment: runtimeEnvironment
         },
+        HOST_CONTEXT: context.hostContext,
         NODE_SCOPE: scope,
-        NODE: toNodeFacade(node),
+        NODE: toNodeFacade(executionNode),
         self: {
             status: node.status,
-            PORTS: node.ports,
+            PORTS: executionNode.ports,
             OUTPUT: outputValue
         } satisfies WorkerSelfState
     };
@@ -441,70 +455,6 @@ const rewriteWorkerSource = (
     return rewritten;
 };
 
-const createVirtualExecuteModuleSource = (helperId: string): string => `
-const helpers = (globalThis.__WF_EXECUTE_HELPERS__ || {})[${JSON.stringify(helperId)}] || {};
-export const executeBackend = async (...args) => {
-  if (typeof helpers.executeBackend !== 'function') {
-    throw new Error('executeBackend helper is not available in worker runtime.');
-  }
-  return helpers.executeBackend(...args);
-};
-export const updateNode = async (...args) => {
-  if (typeof helpers.updateNode !== 'function') {
-    return null;
-  }
-  return helpers.updateNode(...args);
-};
-`;
-
-const createVirtualExecutorModuleSource = (): string => `
-const toRecord = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-const normalizeStatus = (status) => {
-  if (status === 'failed') return 'failed';
-  if (status === 'warning') return 'warning';
-  if (status === 'running') return 'running';
-  if (status === 'stopped') return 'stopped';
-  return 'passed';
-};
-export const normalizeResult = (result) => {
-  if (!result || typeof result !== 'object' || Array.isArray(result)) {
-    return { output: result ?? null, status: 'passed', logs: [] };
-  }
-  const record = result;
-  const logs = Array.isArray(record.logs)
-    ? record.logs.map((entry) => String(entry)).filter((entry) => entry.trim().length > 0)
-    : [];
-  return {
-    output: Object.prototype.hasOwnProperty.call(record, 'output') ? record.output : record,
-    status: normalizeStatus(record.status),
-    logs
-  };
-};
-export const toErrorResult = (message, logs = []) => ({
-  output: { error: String(message) },
-  status: 'failed',
-  logs: [...logs, String(message)]
-});
-export const toNode = (payload) => toRecord(toRecord(payload).NODE);
-export { toRecord };
-`;
-
-const createBrowserNodeBuiltinStubSource = (): string => `
-const createStub = () => {
-  let proxy;
-  const fn = () => undefined;
-  const handler = {
-    get: (_target, key) => (key === 'then' ? undefined : proxy),
-    apply: () => undefined,
-    construct: () => ({})
-  };
-  proxy = new Proxy(fn, handler);
-  return proxy;
-};
-const stub = createStub();
-export default stub;
-`;
-
 export const createNodeExecutorSignature = (modelId: string, source: string): string => {
     let hash = 5381;
     const input = `${modelId}:${source}`;
@@ -640,45 +590,15 @@ export const createWorkerNodeHandler = (args: {
         const helperId = `${workflowId}:${context.node.id}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
         const runtimeEnvironment = args.runtimeEnvironment ?? WorkerRuntimeEnvironmentEnum.Node;
 
-        const executeBackendHelper = args.executeHelpers?.executeBackend
-            ? async (...workerArgs: unknown[]) =>
-                  args.executeHelpers!.executeBackend!({
-                      context: {
-                          node: context.node,
-                          workflow: context.workflow,
-                          input: context.input,
-                          settings: context.settings,
-                          signal: context.signal,
-                          hostContext: context.hostContext,
-                          invokeConnectedNode: context.invokeConnectedNode
-                      },
-                      descriptor:
-                          workerArgs.length > 0 &&
-                          typeof workerArgs[0] === 'object' &&
-                          workerArgs[0] !== null &&
-                          !Array.isArray(workerArgs[0]) &&
-                          typeof (workerArgs[0] as Record<string, unknown>).service === 'string' &&
-                          typeof (workerArgs[0] as Record<string, unknown>).function === 'string'
-                              ? ((workerArgs[0] as unknown) as { service: string; function: string; description?: string })
-                              : undefined,
-                      payload: workerArgs.length > 1 ? workerArgs[1] : undefined,
-                      args: workerArgs
-                  })
-            : undefined;
-
-        const updateNodeHelper = args.executeHelpers?.updateNode
-            ? async (workflow: unknown, nodeId: unknown, patch: unknown) =>
-                  args.executeHelpers!.updateNode!({
-                      workflow: toRecord(workflow).nodes ? (workflow as WorkflowDefinition) : context.workflow,
-                      nodeId: typeof nodeId === 'string' ? nodeId : context.node.id,
-                      patch: toRecord(patch)
-                  })
-            : undefined;
+        const executeBackendHelper = createExecuteBackendHelper(args.executeHelpers, context);
+        const invokeConnectedNodeHelper = createInvokeConnectedNodeHelper(args.executeHelpers, context);
+        const updateNodeHelper = createUpdateNodeHelper(args.executeHelpers, context, toRecord);
 
         globalWorkerHelpers.__WF_EXECUTE_HELPERS__ = {
             ...(globalWorkerHelpers.__WF_EXECUTE_HELPERS__ ?? {}),
             [helperId]: {
                 executeBackend: executeBackendHelper,
+                invokeConnectedNode: invokeConnectedNodeHelper,
                 updateNode: updateNodeHelper
             }
         };

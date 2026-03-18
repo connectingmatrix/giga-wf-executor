@@ -12,9 +12,12 @@ This document is intentionally verbose. It is designed so AI agents and engineer
 - `src/node-core/viewers.ts`
 - `src/executor/jsonl-logger.ts`
 - `src/executor/failure-mitigation.ts`
+- `src/executor/runner-helpers.ts`
 - `src/executor/variables.ts`
 - `src/executor/port-compatibility.ts`
+- `src/executor/worker-helper-bindings.ts`
 - `src/executor/worker-runtime.ts`
+- `src/executor/worker-virtual-modules.ts`
 - `src/executor/workflow-runner.ts`
 - `src/executor/step-runner.ts`
 - `src/executor/create-workflow-executor.ts`
@@ -233,6 +236,25 @@ Functions:
 - `resolveFailureMessageFromResult(...)`
 - `buildRetryAttemptLog(...)`
 
+### `src/executor/runner-helpers.ts`
+
+Purpose: Shared runner-side helpers extracted from both DAG and step execution.
+
+Functions:
+
+- `toPortsIn(...)` / `toPortsOut(...)`
+- `isNodeEnabled(...)`
+- `toRuntimeError(...)`
+- `normalizeNodeStatus(...)`
+- `publishBiControlState(...)`
+- `getBiPeerNodeIds(...)`
+- `createEventCollector(...)`
+
+Why it exists:
+
+- removes duplicated bi-directional port and event-collector logic from `workflow-runner.ts` and `step-runner.ts`
+- keeps full-run and step-run execution behavior aligned without forking helper code
+
 ### `src/executor/variables.ts`
 
 Purpose: Shared runtime template-variable resolution and schema permission enforcement.
@@ -259,10 +281,12 @@ Functions:
 - `createWorkerNodeHandler({ modelId, executeHelpers })`
   - decodes worker source from `workflow.NODE_EXECUTORS[modelId]`.
   - validates signature from `workflow.NODE_EXECUTOR_SIGNATURES[modelId]`.
+  - binds worker helpers from `worker-helper-bindings.ts`.
   - normalizes TypeScript module bootstrap across ESM/CJS/default-wrapped shapes.
-  - rewrites `@workflow/execute` imports to runtime virtual helper module.
+  - rewrites `@workflow/execute` imports to runtime virtual helper modules created in `worker-virtual-modules.ts`.
   - injects current execution settings into `payload.workflow.metadata.runtime.settings` for every worker invocation.
   - expects backend-bridged workers to call `executeBackend({ service, function, description }, payload)`.
+  - supports worker-owned orchestration through `invokeConnectedNode({ nodeId, input, overrides })`.
   - supports dual-runtime worker branching through `payload.ENVIRONMENT` and shared helpers from `@workflow/executor`.
   - in browser runtime, rewrites Node built-in imports (`fs`, `node:fs`, etc.) to stub modules.
   - caches compiled sources by `(modelId, signature)` and loads worker module from `data:` URL.
@@ -277,6 +301,32 @@ Worker payload contract exposed by runtime:
 - `NODE_SCOPE`
 - `NODE` (node snapshot, `PORTS`, `PROPERTIES`, `OUTPUT`)
 - `self` (`status`, `PORTS`, `OUTPUT`)
+
+### `src/executor/worker-helper-bindings.ts`
+
+Purpose: translates worker helper calls into host/runtime callbacks.
+
+Notes:
+
+- wraps `executeBackend(...)` with the full worker context and descriptor/payload separation
+- wraps `invokeConnectedNode(...)` for worker-authored orchestration
+- falls back to the handler context’s `invokeConnectedNode(...)` when the host does not inject an explicit adapter
+
+### `src/executor/worker-virtual-modules.ts`
+
+Purpose: keeps worker imports stable without bundling helper code into every node worker.
+
+Exports:
+
+- virtual `@workflow/execute`
+  - `executeBackend`
+  - `invokeConnectedNode`
+  - `updateNode`
+- virtual `@workflow/executor`
+  - `toRecord`
+  - `toErrorResult`
+  - `toNode`
+  - `normalizeResult`
 
 ### `src/executor/create-workflow-executor.ts`
 

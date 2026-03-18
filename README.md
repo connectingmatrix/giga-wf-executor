@@ -49,11 +49,12 @@ Runtime behavior:
 - Compile diagnostics are normalized into structured failed node outputs/logs.
 - Compiled source is cached by `(modelId, signature)` for run/step reuse.
 - `@workflow/execute` imports are supported in both forms:
-  - `import { executeBackend, updateNode } from '@workflow/execute'`
+  - `import { executeBackend, invokeConnectedNode, updateNode } from '@workflow/execute'`
   - `const m = await import('@workflow/execute')`
 - `@workflow/executor` helper imports are supported for worker-authored utility access at runtime.
 - Virtual helper modules expose:
   - `executeBackend({ service, function, description }, payload)`
+  - `invokeConnectedNode({ nodeId, input, overrides })`
   - `updateNode(...)`
   - `toRecord`, `toErrorResult`, `toNode`, `normalizeResult`
 - Worker payload always includes the full execution graph plus current runtime settings at `payload.workflow.metadata.runtime.settings`.
@@ -62,6 +63,9 @@ Runtime behavior:
   - `payload.EXECUTOR.environment`
 - Local-only workers should execute entirely inside `worker.ts` without calling `executeBackend(...)`.
 - Dual-runtime workers can branch on `payload.ENVIRONMENT` and delegate browser logic to a local helper such as `executeLocal(...)` before using backend bridging on the server path.
+- Nested worker orchestration stays worker-first:
+  - browser hosts can inject `invokeConnectedNode(...)` adapters
+  - server/step hosts fall back to `context.invokeConnectedNode(...)` automatically when no explicit helper adapter is passed
 
 Local/browser import behavior:
 - Node built-in imports (for example `fs`, `node:fs`) are rewritten to non-functional stubs in browser mode.
@@ -201,3 +205,16 @@ Checks:
 ## Detailed documentation
 
 See [`docs/EXECUTOR_ARCHITECTURE.md`](./docs/EXECUTOR_ARCHITECTURE.md) for file-level and function-level explanations.
+
+## Executor layout
+
+The shared runtime is being split into smaller focused helpers to keep worker-first behavior understandable:
+
+- `src/executor/worker-runtime.ts`
+  - signed worker loading, compilation, module resolution
+- `src/executor/worker-helper-bindings.ts`
+  - binds `executeBackend`, `invokeConnectedNode`, and `updateNode` into worker scope
+- `src/executor/worker-virtual-modules.ts`
+  - generates the virtual `@workflow/execute` and `@workflow/executor` runtime modules
+- `src/executor/runner-helpers.ts`
+  - shared runner utilities for port/state helpers and bi-directional control publishing

@@ -364,4 +364,113 @@ export const execute = async () => ({ output: { ok: true }, status: 'passed', lo
         expect(result.status).toBe(WorkflowNodeStatusEnum.Failed);
         expect(String((result.output as Record<string, unknown>).error ?? '')).toContain('signature mismatch');
     });
+
+    it('forwards invokeConnectedNode args with worker context', async () => {
+        const modelId = 'worker-invoke-connected-node';
+        const source = `
+import { invokeConnectedNode } from '@workflow/execute';
+
+export const validate = async () => ({ ok: true, errors: [], warnings: [] });
+export const init = async () => true;
+export const onUpdate = async () => ({ ok: true });
+export const execute = async () => {
+  const invoked = await invokeConnectedNode({
+    nodeId: 'node_connected',
+    input: { input: { node_1: { hello: 'world' } } },
+    overrides: { runtime: { prompt: 'format me' } }
+  });
+  return {
+    output: {
+      status: invoked.result.status,
+      nodeId: invoked.node.id,
+      prompt: invoked.result.output.prompt
+    },
+    status: 'passed',
+    logs: ['invoke-connected-forwarded']
+  };
+};`;
+
+        const workflow = createWorkflow(modelId, source);
+        const context = createContext(workflow);
+        let receivedRequest: Record<string, unknown> | null = null;
+        const handler = createWorkerNodeHandler({
+            modelId,
+            executeHelpers: {
+                invokeConnectedNode: async (request) => {
+                    receivedRequest = request as unknown as Record<string, unknown>;
+                    return {
+                        node: { ...context.node, id: 'node_connected' },
+                        result: {
+                            output: { prompt: 'format me' },
+                            status: WorkflowNodeStatusEnum.Passed,
+                            logs: ['connected-node']
+                        }
+                    };
+                }
+            }
+        });
+
+        const result = await handler(context);
+
+        expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
+        expect(result.logs).toContain('invoke-connected-forwarded');
+        expect(receivedRequest).toBeTruthy();
+        expect((receivedRequest?.payload as Record<string, unknown>)?.nodeId).toBe('node_connected');
+        expect((((receivedRequest?.payload as Record<string, unknown>)?.overrides as Record<string, unknown>)?.runtime as Record<string, unknown>)?.prompt).toBe('format me');
+        expect((((receivedRequest?.context as Record<string, unknown>)?.node as Record<string, unknown>)?.id)).toBe('node_1');
+        expect((result.output as Record<string, unknown>).prompt).toBe('format me');
+    });
+
+    it('falls back to context invokeConnectedNode when no explicit execute helper is provided', async () => {
+        const modelId = 'worker-invoke-connected-node-context';
+        const source = `
+import { invokeConnectedNode } from '@workflow/execute';
+
+export const validate = async () => ({ ok: true, errors: [], warnings: [] });
+export const init = async () => true;
+export const onUpdate = async () => ({ ok: true });
+export const execute = async () => {
+  const invoked = await invokeConnectedNode({
+    nodeId: 'node_connected',
+    input: { input: { node_1: { hello: 'world' } } },
+    overrides: { runtime: { prompt: 'context fallback' } }
+  });
+  return {
+    output: {
+      status: invoked.result.status,
+      nodeId: invoked.node.id,
+      prompt: invoked.result.output.prompt
+    },
+    status: 'passed',
+    logs: ['invoke-connected-context']
+  };
+};`;
+
+        const workflow = createWorkflow(modelId, source);
+        const baseContext = createContext(workflow);
+        let receivedArgs: Record<string, unknown> | null = null;
+        const handler = createWorkerNodeHandler({ modelId });
+
+        const result = await handler({
+            ...baseContext,
+            invokeConnectedNode: async (args) => {
+                receivedArgs = args as unknown as Record<string, unknown>;
+                return {
+                    node: { ...baseContext.node, id: 'node_connected' },
+                    result: {
+                        output: { prompt: 'context fallback' },
+                        status: WorkflowNodeStatusEnum.Passed,
+                        logs: ['connected-node-context']
+                    }
+                };
+            }
+        });
+
+        expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
+        expect(result.logs).toContain('invoke-connected-context');
+        expect(receivedArgs).toBeTruthy();
+        expect(receivedArgs?.nodeId).toBe('node_connected');
+        expect(((receivedArgs?.overrides as Record<string, unknown>)?.runtime as Record<string, unknown>)?.prompt).toBe('context fallback');
+        expect((result.output as Record<string, unknown>).prompt).toBe('context fallback');
+    });
 });
