@@ -154,6 +154,24 @@ export interface WorkflowNodeHandlerResult {
 
 export type WorkflowNodeHandler = (context: WorkflowNodeHandlerContext) => Promise<WorkflowNodeHandlerResult>;
 
+export interface WorkflowExecuteBackendDescriptor {
+    service: string;
+    function: string;
+    description?: string;
+}
+
+export interface WorkflowExecuteBackendRequest {
+    context: WorkflowNodeHandlerContext;
+    descriptor?: WorkflowExecuteBackendDescriptor;
+    payload?: unknown;
+    args: unknown[];
+}
+
+export interface WorkerExecuteHelpers {
+    executeBackend?: (request: WorkflowExecuteBackendRequest) => Promise<WorkflowNodeHandlerResult>;
+    updateNode?: (...args: unknown[]) => Promise<void> | void;
+}
+
 export interface WorkflowStepOverrides {
     runtime?: Record<string, unknown>;
     properties?: Record<string, unknown>;

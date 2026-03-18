@@ -179,7 +179,47 @@ describe('step variable resolution', () => {
         expect(result.node.status).toBe(WorkflowNodeStatusEnum.Passed);
     });
 
+    it('resolves workflow graph metadata and runtime settings in step variable tokens', async () => {
+        const workflow = createWorkflow();
+        const start = createStartNode(1);
+        start.status = WorkflowNodeStatusEnum.Passed;
+        start.ports.out = { output: { message: 'Hi' } };
+        const code = createCodeNode(2);
+        code.runtime = {
+            prompt: 'Ctx {{workflow.metadata.name}} / {{workflow.nodes[0].name}} / {{workflow.connections[0].id}} / {{workflow.runtime.settings.graphqlUrl}} / {{workflow.settings.authMode}}'
+        };
+        workflow.nodes = [start, code];
+        workflow.connections = [createConnection('c1', start.id, code.id)];
+        workflow.nodeModels = {
+            code: {
+                id: 'code',
+                fields: {
+                    prompt: {
+                        type: 'textarea',
+                        allowVariables: true
+                    }
+                }
+            }
+        };
+
+        let seenPrompt = '';
+        const executor = createWorkflowExecutor({
+            mode: WorkflowExecutorModeEnum.Local,
+            adapters: createAdapters({
+                code: async (node) => {
+                    seenPrompt = String(node.runtime.prompt ?? '');
+                    return { output: { prompt: seenPrompt }, status: WorkflowNodeStatusEnum.Passed };
+                }
+            })
+        });
+
+        const result = await executor.executeNodeStep({ workflow, nodeId: code.id, settings: { graphqlUrl: 'http://localhost/graphql', authMode: 'none' } });
+        expect(seenPrompt).toBe('Ctx Workflow Test / Start / c1 / http://localhost/graphql / none');
+        expect(result.node.status).toBe(WorkflowNodeStatusEnum.Passed);
+    });
+
     it('fails step execution when variable token is unresolved', async () => {
+
         const workflow = createWorkflow();
         const code = createCodeNode(2);
         code.runtime = { prompt: 'Summary {{input.node_start_1.output.message}}' };

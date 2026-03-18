@@ -123,7 +123,17 @@ const createEventCollector = (options: ExecuteNodeStepOptions): { events: Workfl
 /** Purpose: executes a single workflow node with upstream ports context and returns updated canonical workflow state. */
 export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerContext, options: ExecuteNodeStepOptions): Promise<WorkflowStepExecutorResult> => {
     const runId = createRunId('step');
-    let workingWorkflow: WorkflowDefinition = { ...options.workflow };
+    let workingWorkflow: WorkflowDefinition = {
+        ...options.workflow,
+        metadata: {
+            ...(options.workflow.metadata ?? {}),
+            runtime: {
+                ...toRecord(options.workflow.metadata?.runtime),
+                settings: { ...options.settings }
+            }
+        }
+    };
+
     const { events, sink } = createEventCollector(options);
     const outputsByNode = new Map<string, Record<string, unknown>>();
     workingWorkflow.nodes.forEach((item) => outputsByNode.set(item.id, toPortsOut(item)));
@@ -173,7 +183,7 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
         const retryLimit = resolveFailureRetryLimit(runningNode);
         const retryAttemptLogs: string[] = [];
         const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
-        const variableResolution = resolveNodeRuntimeVariables(workingWorkflow, runningNode, input);
+        const variableResolution = resolveNodeRuntimeVariables(workingWorkflow, runningNode, input, options.settings);
         if (!variableResolution.ok) {
             const message = formatVariableFailureMessage(variableResolution.failures, runningNode.name);
             const failedNode = publishBiControlState(workingWorkflow, buildFailedNodeState(runningNode, message));

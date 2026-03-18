@@ -53,12 +53,15 @@ Runtime behavior:
   - `const m = await import('@workflow/execute')`
 - `@workflow/executor` helper imports are supported for worker-authored utility access at runtime.
 - Virtual helper modules expose:
-  - `executeBackend(NODELikePayload)`
+  - `executeBackend({ service, function, description }, payload)`
   - `updateNode(...)`
   - `toRecord`, `toErrorResult`, `toNode`, `normalizeResult`
+- Worker payload always includes the full execution graph plus current runtime settings at `payload.workflow.metadata.runtime.settings`.
 - Worker payload now includes runtime environment hints:
   - `payload.ENVIRONMENT` (`browser` or `node`)
   - `payload.EXECUTOR.environment`
+- Local-only workers should execute entirely inside `worker.ts` without calling `executeBackend(...)`.
+- Dual-runtime workers can branch on `payload.ENVIRONMENT` and delegate browser logic to a local helper such as `executeLocal(...)` before using backend bridging on the server path.
 
 Local/browser import behavior:
 - Node built-in imports (for example `fs`, `node:fs`) are rewritten to non-functional stubs in browser mode.
@@ -140,7 +143,9 @@ Behavior:
 - Resolution context includes:
   - upstream input map (port and source-node aliases),
   - node runtime/properties map,
-  - workflow metadata.
+  - workflow metadata,
+  - workflow nodes and workflow connections,
+  - runtime settings at `workflow.runtime.settings` (with `workflow.settings` as an alias).
 - If any token cannot be resolved, node fails before handler call with:
   - `output.error` message,
   - `output.variableFailures` detail array,

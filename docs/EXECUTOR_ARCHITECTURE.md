@@ -37,6 +37,7 @@ Key groups:
     - `NODE_EXECUTOR_SIGNATURES` (`modelId -> signature`)
   - `WorkflowNodeModel` uses `runtime` (flat key/value) and `ports.in`/`ports.out`.
 - Runtime types: `WorkflowRuntimeSettings`, `WorkflowRunLogEvent`.
+- Backend bridge types: `WorkflowExecuteBackendDescriptor`, `WorkflowExecuteBackendRequest`.
 - Handler contracts:
   - `WorkflowNodeHandlerContext`
   - `WorkflowNodeHandlerResult`
@@ -178,6 +179,7 @@ Major stages:
    - Workflow run exits without `workflow.completed` when terminal node failure occurs.
 11. Variable resolution layer:
    - resolves runtime token values (for example {{input.node_id.output.key}}) before handler execution.
+   - resolution context also exposes workflow metadata, nodes, connections, and runtime settings (`workflow.runtime.settings` / `workflow.settings`).
    - unresolved or disallowed tokens fail node before handler invocation.
    - disallowed enforcement reads optional schema flag workflow.nodeModels[modelId].fields[field].allowVariables.
    - resolved values are execution-local and do not rewrite canonical persisted runtime config.
@@ -203,6 +205,7 @@ Major stages:
    - aggregate retry logs into returned step result logs.
 8. Apply the same variable resolution contract as DAG runs:
    - resolve runtime template tokens before node handler invocation,
+   - expose workflow metadata, graph state, and runtime settings to token resolution,
    - fail node immediately for unresolved/disallowed tokens with structured error output.
 
 ### `src/executor/port-compatibility.ts`
@@ -238,6 +241,7 @@ Functions:
 
 - `resolveNodeRuntimeVariables(...)`
   - resolves {{...}} tokens against execution context.
+  - exposes workflow metadata, nodes, connections, and runtime settings to runtime token resolution.
   - validates unresolved tokens.
   - validates disallowed usage via schema allowVariables flags when schema exists.
 - `formatVariableFailureMessage(...)`
@@ -257,6 +261,9 @@ Functions:
   - validates signature from `workflow.NODE_EXECUTOR_SIGNATURES[modelId]`.
   - normalizes TypeScript module bootstrap across ESM/CJS/default-wrapped shapes.
   - rewrites `@workflow/execute` imports to runtime virtual helper module.
+  - injects current execution settings into `payload.workflow.metadata.runtime.settings` for every worker invocation.
+  - expects backend-bridged workers to call `executeBackend({ service, function, description }, payload)`.
+  - supports dual-runtime worker branching through `payload.ENVIRONMENT` and shared helpers from `@workflow/executor`.
   - in browser runtime, rewrites Node built-in imports (`fs`, `node:fs`, etc.) to stub modules.
   - caches compiled sources by `(modelId, signature)` and loads worker module from `data:` URL.
   - enforces required exports (`validate/init/onUpdate/execute`).

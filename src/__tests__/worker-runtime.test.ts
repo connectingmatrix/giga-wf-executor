@@ -62,7 +62,102 @@ const createContext = (workflow: WorkflowDefinition): WorkflowNodeHandlerContext
 });
 
 describe('worker runtime compilation and loading', () => {
+    it('forwards executeBackend descriptor and payload args with context metadata', async () => {
+        const modelId = 'worker-execute-backend-args';
+        const source = `
+import { executeBackend } from '@workflow/execute';
+
+export const validate = async () => ({ ok: true, errors: [], warnings: [] });
+export const init = async () => true;
+export const onUpdate = async () => ({ ok: true });
+export const execute = async () => {
+  return executeBackend(
+    {
+      service: 'services/workflow/nodes/node-handlers.ts',
+      function: 'executeWorkerBackendArgsNode',
+      description: 'Tests descriptor argument forwarding.'
+    },
+    { fromWorker: true, value: 42 }
+  );
+};`;
+
+        const workflow = createWorkflow(modelId, source);
+        const context = createContext(workflow);
+        let receivedRequest: Record<string, unknown> | null = null;
+        const handler = createWorkerNodeHandler({
+            modelId,
+            executeHelpers: {
+                executeBackend: async (request) => {
+                    receivedRequest = request as unknown as Record<string, unknown>;
+                    return {
+                        output: {
+                            ok: true
+                        },
+                        status: WorkflowNodeStatusEnum.Passed,
+                        logs: ['execute-backend-forwarded']
+                    };
+                }
+            }
+        });
+
+        const result = await handler(context);
+
+        expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
+        expect(result.logs).toContain('execute-backend-forwarded');
+        expect(receivedRequest).toBeTruthy();
+        expect((receivedRequest?.descriptor as Record<string, unknown>)?.service).toBe('services/workflow/nodes/node-handlers.ts');
+        expect((receivedRequest?.descriptor as Record<string, unknown>)?.function).toBe('executeWorkerBackendArgsNode');
+        expect((receivedRequest?.payload as Record<string, unknown>)?.fromWorker).toBe(true);
+        expect(((receivedRequest?.context as Record<string, unknown>)?.node as Record<string, unknown>)?.id).toBe('node_1');
+    });
+
+    it('injects workflow graph metadata and runtime settings into worker payload', async () => {
+        const modelId = 'worker-context-payload';
+        const source = `
+export const validate = async () => ({ ok: true, errors: [], warnings: [] });
+export const init = async () => true;
+export const onUpdate = async () => ({ ok: true });
+export const execute = async (payload) => ({
+  output: {
+    workflowName: payload.workflow?.metadata?.name ?? null,
+    nodeCount: Array.isArray(payload.workflow?.nodes) ? payload.workflow.nodes.length : 0,
+    connectionCount: Array.isArray(payload.workflow?.connections) ? payload.workflow.connections.length : 0,
+    graphqlUrl: payload.workflow?.metadata?.runtime?.settings?.graphqlUrl ?? null
+  },
+  status: 'passed',
+  logs: ['worker-context']
+});`;
+
+        const workflow = createWorkflow(modelId, source);
+        workflow.nodes.push({
+            ...workflow.nodes[0],
+            id: 'node_2',
+            gigaId: 'node_2',
+            name: 'Node 2'
+        });
+        workflow.connections = [
+            {
+                id: 'c1',
+                name: 'node_1->node_2',
+                from: 'node_1',
+                to: 'node_2'
+            }
+        ];
+
+        const context = createContext(workflow);
+        const handler = createWorkerNodeHandler({ modelId });
+        const result = await handler(context);
+
+        expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
+        expect((result.output as Record<string, unknown>).workflowName).toBe('Worker Runtime Test');
+        expect((result.output as Record<string, unknown>).nodeCount).toBe(2);
+        expect((result.output as Record<string, unknown>).connectionCount).toBe(1);
+        expect((result.output as Record<string, unknown>).graphqlUrl).toBe('http://localhost/graphql');
+        expect(result.logs).toContain('worker-context');
+    });
+
     it('normalizes nested TypeScript module shapes and does not crash on missing ES2022 enum path', async () => {
+
         const modelId = 'nested-ts-shape';
         const source = `
 export const validate = async () => ({ ok: true, errors: [], warnings: [] });

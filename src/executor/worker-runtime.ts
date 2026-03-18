@@ -1,5 +1,6 @@
 import {
     WorkerExecuteResult,
+    WorkerExecuteHelpers,
     WorkerModuleExports,
     WorkerPayload,
     WorkerRuntimeEnvironment,
@@ -18,11 +19,6 @@ import {
 } from '../types';
 
 type TypeScriptModuleApi = typeof import('typescript');
-
-interface WorkerExecuteHelpers {
-    executeBackend?: (...args: unknown[]) => Promise<WorkflowNodeHandlerResult>;
-    updateNode?: (...args: unknown[]) => Promise<void> | void;
-}
 
 interface GlobalWorkerHelpers {
     __WF_EXECUTE_HELPERS__?: Record<string, WorkerExecuteHelpers>;
@@ -176,8 +172,19 @@ const buildWorkerPayload = (
     nodeOverride?: WorkflowNodeModel
 ): WorkerPayload => {
     const node = nodeOverride ?? context.node;
+    const workflowMetadata: WorkflowDefinition['metadata'] = {
+        ...(context.workflow.metadata ?? {}),
+        runtime: {
+            ...toRecord(context.workflow.metadata?.runtime),
+            settings: context.settings
+        }
+    };
+
     return {
-        workflow: context.workflow,
+        workflow: {
+            ...context.workflow,
+            metadata: workflowMetadata
+        },
         ENVIRONMENT: runtimeEnvironment,
         EXECUTOR: {
             environment: runtimeEnvironment
@@ -436,11 +443,11 @@ const rewriteWorkerSource = (
 
 const createVirtualExecuteModuleSource = (helperId: string): string => `
 const helpers = (globalThis.__WF_EXECUTE_HELPERS__ || {})[${JSON.stringify(helperId)}] || {};
-export const executeBackend = async (NODE) => {
+export const executeBackend = async (...args) => {
   if (typeof helpers.executeBackend !== 'function') {
     throw new Error('executeBackend helper is not available in worker runtime.');
   }
-  return helpers.executeBackend(NODE);
+  return helpers.executeBackend(...args);
 };
 export const updateNode = async (...args) => {
   if (typeof helpers.updateNode !== 'function') {
@@ -634,15 +641,28 @@ export const createWorkerNodeHandler = (args: {
         const runtimeEnvironment = args.runtimeEnvironment ?? WorkerRuntimeEnvironmentEnum.Node;
 
         const executeBackendHelper = args.executeHelpers?.executeBackend
-            ? async () =>
+            ? async (...workerArgs: unknown[]) =>
                   args.executeHelpers!.executeBackend!({
-                      node: context.node,
-                      workflow: context.workflow,
-                      input: context.input,
-                      settings: context.settings,
-                      signal: context.signal,
-                      hostContext: context.hostContext,
-                      invokeConnectedNode: context.invokeConnectedNode
+                      context: {
+                          node: context.node,
+                          workflow: context.workflow,
+                          input: context.input,
+                          settings: context.settings,
+                          signal: context.signal,
+                          hostContext: context.hostContext,
+                          invokeConnectedNode: context.invokeConnectedNode
+                      },
+                      descriptor:
+                          workerArgs.length > 0 &&
+                          typeof workerArgs[0] === 'object' &&
+                          workerArgs[0] !== null &&
+                          !Array.isArray(workerArgs[0]) &&
+                          typeof (workerArgs[0] as Record<string, unknown>).service === 'string' &&
+                          typeof (workerArgs[0] as Record<string, unknown>).function === 'string'
+                              ? ((workerArgs[0] as unknown) as { service: string; function: string; description?: string })
+                              : undefined,
+                      payload: workerArgs.length > 1 ? workerArgs[1] : undefined,
+                      args: workerArgs
                   })
             : undefined;
 

@@ -127,7 +127,17 @@ const createEventCollector = (options: ExecuteWorkflowOptions): { events: Workfl
 /** Purpose: executes the whole DAG once using canonical runtime+ports state and emits lifecycle events via callback. */
 export const executeWorkflowWithContext = async (runtime: WorkflowRunnerContext, workflow: WorkflowDefinition, options: ExecuteWorkflowOptions): Promise<WorkflowExecutorResult> => {
     const runId = createRunId('run');
-    let currentWorkflow: WorkflowDefinition = { ...workflow };
+    let currentWorkflow: WorkflowDefinition = {
+        ...workflow,
+        metadata: {
+            ...(workflow.metadata ?? {}),
+            runtime: {
+                ...toRecord(workflow.metadata?.runtime),
+                settings: { ...options.settings }
+            }
+        }
+    };
+
     const { events, sink } = createEventCollector(options);
     const startNodeIds = currentWorkflow.nodes.filter((node) => node.modelId === START_MODEL_ID).map((node) => node.id);
     const hasEndNode = currentWorkflow.nodes.some((node) => node.modelId === END_MODEL_ID);
@@ -178,7 +188,7 @@ export const executeWorkflowWithContext = async (runtime: WorkflowRunnerContext,
         const retryLimit = resolveFailureRetryLimit(runningNode);
         const retryAttemptLogs: string[] = [];
         const canRunLocally = options.isNodeLocalCapable ? options.isNodeLocalCapable(runningNode.modelId) : true;
-        const variableResolution = resolveNodeRuntimeVariables(currentWorkflow, runningNode, input);
+        const variableResolution = resolveNodeRuntimeVariables(currentWorkflow, runningNode, input, options.settings);
         if (!variableResolution.ok) {
             const message = formatVariableFailureMessage(variableResolution.failures, runningNode.name);
             const failedNode = publishBiControlState(currentWorkflow, buildFailedNodeState(runningNode, message));

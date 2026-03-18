@@ -1,4 +1,4 @@
-import { WorkflowDefinition, WorkflowNodeModel, WorkflowNodeStatusEnum } from '../types';
+import { WorkflowDefinition, WorkflowNodeModel, WorkflowNodeStatusEnum, WorkflowRuntimeSettings } from '../types';
 
 const VARIABLE_TOKEN_REGEX = /\{\{\s*([^}]+?)\s*\}\}/g;
 const FULL_TOKEN_REGEX = /^\s*\{\{\s*([^}]+?)\s*\}\}\s*$/;
@@ -123,6 +123,31 @@ const buildInputVariableContext = (input: Record<string, Record<string, unknown>
     };
 };
 
+const buildWorkflowVariableContext = (workflow: WorkflowDefinition, settings?: WorkflowRuntimeSettings): Record<string, unknown> => {
+    const metadata = cloneValue(workflow.metadata) as Record<string, unknown>;
+    const metadataRuntime = parseRecord(metadata.runtime);
+    const runtimeSettings = cloneValue(
+        Object.keys(parseRecord(settings as unknown)).length > 0 ? parseRecord(settings as unknown) : parseRecord(metadataRuntime.settings)
+    );
+
+    metadata.runtime = {
+        ...metadataRuntime,
+        settings: runtimeSettings
+    };
+
+    return {
+        metadata,
+        nodes: cloneValue(workflow.nodes),
+        connections: cloneValue(workflow.connections),
+        status: WorkflowNodeStatusEnum.Running,
+        runtime: {
+            ...parseRecord(metadata.runtime),
+            settings: runtimeSettings
+        },
+        settings: runtimeSettings
+    };
+};
+
 const resolveFieldAllowVariables = (workflow: WorkflowDefinition, node: WorkflowNodeModel, fieldKey: string): boolean => {
     const schema = node.modelId ? workflow.nodeModels?.[node.modelId] : undefined;
     if (!schema) return true;
@@ -150,7 +175,12 @@ export interface WorkflowNodeVariableResolutionResult {
     failures: WorkflowVariableFailure[];
 }
 
-export const resolveNodeRuntimeVariables = (workflow: WorkflowDefinition, node: WorkflowNodeModel, input: Record<string, Record<string, unknown>>): WorkflowNodeVariableResolutionResult => {
+export const resolveNodeRuntimeVariables = (
+    workflow: WorkflowDefinition,
+    node: WorkflowNodeModel,
+    input: Record<string, Record<string, unknown>>,
+    settings?: WorkflowRuntimeSettings
+): WorkflowNodeVariableResolutionResult => {
     const runtime = parseRecord(node.runtime);
     const context: Record<string, unknown> = {
         input: buildInputVariableContext(input),
@@ -162,10 +192,7 @@ export const resolveNodeRuntimeVariables = (workflow: WorkflowDefinition, node: 
             modelId: node.modelId,
             status: node.status
         },
-        workflow: {
-            metadata: workflow.metadata,
-            status: WorkflowNodeStatusEnum.Running
-        }
+        workflow: buildWorkflowVariableContext(workflow, settings)
     };
 
     const failures: WorkflowVariableFailure[] = [];
