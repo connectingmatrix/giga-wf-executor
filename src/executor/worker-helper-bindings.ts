@@ -57,8 +57,13 @@ export const createInvokeConnectedNodeHelper = (
             });
     }
     if (!context.invokeConnectedNode) return undefined;
-    return async (...workerArgs: unknown[]) =>
-        context.invokeConnectedNode!((workerArgs[0] ?? undefined) as WorkflowInvokeConnectedNodeArgs | undefined);
+    return async (...workerArgs: unknown[]) => {
+        const payload = workerArgs[0] as WorkflowInvokeConnectedNodeArgs | undefined;
+        if (!payload || typeof payload.nodeId !== 'string' || payload.nodeId.trim().length === 0) {
+            throw new Error('invokeConnectedNode requires a nodeId argument.');
+        }
+        return context.invokeConnectedNode!(payload);
+    };
 };
 
 export const createUpdateNodeHelper = (

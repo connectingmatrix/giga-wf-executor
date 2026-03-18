@@ -105,10 +105,11 @@ export const execute = async () => {
         expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
         expect(result.logs).toContain('execute-backend-forwarded');
         expect(receivedRequest).toBeTruthy();
-        expect((receivedRequest?.descriptor as Record<string, unknown>)?.service).toBe('services/workflow/nodes/node-handlers.ts');
-        expect((receivedRequest?.descriptor as Record<string, unknown>)?.function).toBe('executeWorkerBackendArgsNode');
-        expect((receivedRequest?.payload as Record<string, unknown>)?.fromWorker).toBe(true);
-        expect(((receivedRequest?.context as Record<string, unknown>)?.node as Record<string, unknown>)?.id).toBe('node_1');
+        const backendRequest = receivedRequest as unknown as Record<string, unknown>;
+        expect((backendRequest.descriptor as Record<string, unknown>)?.service).toBe('services/workflow/nodes/node-handlers.ts');
+        expect((backendRequest.descriptor as Record<string, unknown>)?.function).toBe('executeWorkerBackendArgsNode');
+        expect((backendRequest.payload as Record<string, unknown>)?.fromWorker).toBe(true);
+        expect(((backendRequest.context as Record<string, unknown>)?.node as Record<string, unknown>)?.id).toBe('node_1');
     });
 
     it('injects workflow graph metadata and runtime settings into worker payload', async () => {
@@ -415,9 +416,10 @@ export const execute = async () => {
         expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
         expect(result.logs).toContain('invoke-connected-forwarded');
         expect(receivedRequest).toBeTruthy();
-        expect((receivedRequest?.payload as Record<string, unknown>)?.nodeId).toBe('node_connected');
-        expect((((receivedRequest?.payload as Record<string, unknown>)?.overrides as Record<string, unknown>)?.runtime as Record<string, unknown>)?.prompt).toBe('format me');
-        expect((((receivedRequest?.context as Record<string, unknown>)?.node as Record<string, unknown>)?.id)).toBe('node_1');
+        const invokeRequest = receivedRequest as unknown as Record<string, unknown>;
+        expect((invokeRequest.payload as Record<string, unknown>)?.nodeId).toBe('node_connected');
+        expect((((invokeRequest.payload as Record<string, unknown>)?.overrides as Record<string, unknown>)?.runtime as Record<string, unknown>)?.prompt).toBe('format me');
+        expect((((invokeRequest.context as Record<string, unknown>)?.node as Record<string, unknown>)?.id)).toBe('node_1');
         expect((result.output as Record<string, unknown>).prompt).toBe('format me');
     });
 
@@ -469,8 +471,9 @@ export const execute = async () => {
         expect(result.status).toBe(WorkflowNodeStatusEnum.Passed);
         expect(result.logs).toContain('invoke-connected-context');
         expect(receivedArgs).toBeTruthy();
-        expect(receivedArgs?.nodeId).toBe('node_connected');
-        expect(((receivedArgs?.overrides as Record<string, unknown>)?.runtime as Record<string, unknown>)?.prompt).toBe('context fallback');
+        const invokeArgs = receivedArgs as unknown as Record<string, unknown>;
+        expect(invokeArgs.nodeId).toBe('node_connected');
+        expect(((invokeArgs.overrides as Record<string, unknown>)?.runtime as Record<string, unknown>)?.prompt).toBe('context fallback');
         expect((result.output as Record<string, unknown>).prompt).toBe('context fallback');
     });
 });

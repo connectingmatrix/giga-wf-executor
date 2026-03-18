@@ -1,7 +1,7 @@
 import { buildNodeInputContext } from '../node-core/run-context';
 import { createRunId, emitNodeFailed, emitNodeFinished, emitNodeLogs, emitNodeStarted } from '../node-core/log';
 import { buildCompletedNodeState, buildFailedNodeState, buildRunningNodeState, replaceNodeById } from '../node-core/state';
-import { ExecuteNodeStepOptions, WorkflowDefinition, WorkflowExecutorAdapters, WorkflowExecutorMode, WorkflowNodeHandlerResult, WorkflowNodeStatusEnum, WorkflowStepExecutorResult } from '../types';
+import { ExecuteNodeStepOptions, WorkflowDefinition, WorkflowExecutorAdapters, WorkflowExecutorMode, WorkflowNodeHandlerResult, WorkflowNodeModel, WorkflowNodeStatusEnum, WorkflowStepExecutorResult } from '../types';
 import { buildRetryAttemptLog, resolveFailureMessageFromResult, resolveFailureRetryLimit, resolveResultStatus } from './failure-mitigation';
 import { createEventCollector, getBiPeerNodeIds, isNodeEnabled, normalizeNodeStatus, publishBiControlState, toPortsIn, toPortsOut, toRunnerRecord as toRecord, toRuntimeError } from './runner-helpers';
 import { formatVariableFailureMessage, resolveNodeRuntimeVariables } from './variables';

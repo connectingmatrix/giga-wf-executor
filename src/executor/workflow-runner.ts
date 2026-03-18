@@ -1,4 +1,4 @@
-import { ExecuteWorkflowOptions, WorkflowDefinition, WorkflowExecutorAdapters, WorkflowExecutorMode, WorkflowExecutorResult, WorkflowNodeStatusEnum, WorkflowStepOverrides } from '../types';
+import { ExecuteWorkflowOptions, WorkflowDefinition, WorkflowExecutorAdapters, WorkflowExecutorMode, WorkflowExecutorResult, WorkflowNodeModel, WorkflowNodeStatusEnum, WorkflowStepOverrides } from '../types';
 import { buildNodeInputContext, collectReachableNodeIdsFromStartNodes, shouldExecuteNodeInCurrentRun, sortWorkflowNodesTopologically } from '../node-core/run-context';
 import { createRunId, emitNodeFailed, emitNodeFinished, emitNodeLogs, emitNodeStarted, emitWorkflowCompleted, emitWorkflowStopped, emitWorkflowValidationFailed } from '../node-core/log';
 import { buildCompletedNodeState, buildFailedNodeState, buildRunningNodeState, markRunningNodesAsStopped, replaceNodeById } from '../node-core/state';
