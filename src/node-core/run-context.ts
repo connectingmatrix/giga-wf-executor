@@ -1,4 +1,6 @@
-import { WorkflowConnectionModel, WorkflowDefinition } from '../types';
+import { WorkflowConnectionModel, WorkflowDefinition, WorkflowNodeSchema } from '../types';
+
+const BI_DIRECTIONAL_PORT_TYPE = 'bi-directional';
 
 const parseTargetInputPortName = (connection: WorkflowConnectionModel): string => {
     const [, parsedPort] = (connection.targetHandle ?? '').split(':');
@@ -9,6 +11,9 @@ const parseSourceOutputPortName = (connection: WorkflowConnectionModel): string 
     const [, parsedPort] = (connection.sourceHandle ?? '').split(':');
     return parsedPort?.trim() ? parsedPort : 'output';
 };
+
+const toRecord = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 
 const parseStringArray = (value: unknown): string[] | null => {
     if (!Array.isArray(value)) return null;
@@ -30,21 +35,99 @@ const resolveSourceOutputValue = (sourcePortsOut: Record<string, unknown>, conne
     return sourcePortsOut.output;
 };
 
+const getNodeSchema = (workflow: WorkflowDefinition, nodeId: string): WorkflowNodeSchema | null => {
+    const node = workflow.nodes.find((item) => item.id === nodeId);
+    if (!node) return null;
+    const schema = workflow.nodeModels?.[node.modelId];
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return null;
+    return schema;
+};
+
+const getSourcePortType = (workflow: WorkflowDefinition, connection: WorkflowConnectionModel): string | undefined => {
+    const schema = getNodeSchema(workflow, connection.from);
+    if (!schema || typeof schema.outputs !== 'object' || !schema.outputs) return undefined;
+    const sourcePortName = parseSourceOutputPortName(connection);
+    return (schema.outputs as Record<string, { portType?: unknown }>)[sourcePortName]?.portType as string | undefined;
+};
+
+const getTargetPortType = (workflow: WorkflowDefinition, connection: WorkflowConnectionModel): string | undefined => {
+    const schema = getNodeSchema(workflow, connection.to);
+    if (!schema || typeof schema.inputs !== 'object' || !schema.inputs) return undefined;
+    const targetPortName = parseTargetInputPortName(connection);
+    return (schema.inputs as Record<string, { portType?: unknown }>)[targetPortName]?.portType as string | undefined;
+};
+
+const isBiConnection = (workflow: WorkflowDefinition, connection: WorkflowConnectionModel): boolean => {
+    const sourcePortType = getSourcePortType(workflow, connection);
+    const targetPortType = getTargetPortType(workflow, connection);
+    return sourcePortType === BI_DIRECTIONAL_PORT_TYPE && targetPortType === BI_DIRECTIONAL_PORT_TYPE;
+};
+
+const resolveBiState = (sourcePortsOut: Record<string, unknown>, sourcePortName: string): unknown => {
+    const sourcePortValue = sourcePortsOut[sourcePortName];
+    if (!sourcePortValue || typeof sourcePortValue !== 'object' || Array.isArray(sourcePortValue)) return undefined;
+    const sourcePortRecord = sourcePortValue as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(sourcePortRecord, 'STATE')) return sourcePortRecord.STATE;
+    return sourcePortRecord;
+};
+
+const ensureBiPortBucket = (inputContext: Record<string, Record<string, unknown>>, inputPortName: string): { IN: Record<string, unknown>; STATE: Record<string, unknown> } => {
+    const current = toRecord(inputContext[inputPortName]);
+    const incoming = toRecord(current.IN);
+    const state = toRecord(current.STATE);
+    const next = { ...current, IN: incoming, STATE: state };
+    inputContext[inputPortName] = next;
+    return next as { IN: Record<string, unknown>; STATE: Record<string, unknown> };
+};
+
 /** Purpose: builds a deterministic per-port input map from upstream ports.out values for a node execution. */
 export const buildNodeInputContext = (workflow: WorkflowDefinition, nodeId: string, outputsByNodeId: Map<string, Record<string, unknown>>, fallbackInput: Record<string, Record<string, unknown>>): Record<string, Record<string, unknown>> => {
-    const incoming = workflow.connections.filter((connection) => connection.to === nodeId);
-    if (!incoming.length) return fallbackInput;
-    return incoming.reduce<Record<string, Record<string, unknown>>>((acc, connection) => {
+    const relevantConnections = workflow.connections.filter((connection) => connection.to === nodeId || (connection.from === nodeId && isBiConnection(workflow, connection)));
+    if (!relevantConnections.length) return fallbackInput;
+
+    const resolvedContext = relevantConnections.reduce<Record<string, Record<string, unknown>>>((acc, connection) => {
+        const connectionIsBi = isBiConnection(workflow, connection);
+        if (connection.from === nodeId && connectionIsBi) {
+            const peerPortsOut = outputsByNodeId.get(connection.to);
+            if (!peerPortsOut) return acc;
+            const localPortName = parseSourceOutputPortName(connection);
+            const peerOutputPortName = parseTargetInputPortName(connection);
+            const bucket = ensureBiPortBucket(acc, localPortName);
+            const peerPortValue = Object.prototype.hasOwnProperty.call(peerPortsOut, peerOutputPortName) ? peerPortsOut[peerOutputPortName] : peerPortsOut.output;
+            if (typeof peerPortValue !== 'undefined') {
+                bucket.IN[connection.to] = peerPortValue;
+            }
+            const peerState = resolveBiState(peerPortsOut, peerOutputPortName);
+            if (typeof peerState !== 'undefined') {
+                bucket.STATE[connection.to] = peerState;
+            }
+            return acc;
+        }
+
+        if (connection.to !== nodeId) return acc;
         const sourcePortsOut = outputsByNodeId.get(connection.from);
         if (!sourcePortsOut) return acc;
         if (!isConnectionActiveForExecution(connection, sourcePortsOut)) return acc;
         const sourceOutput = resolveSourceOutputValue(sourcePortsOut, connection);
         if (typeof sourceOutput === 'undefined') return acc;
         const inputPortName = parseTargetInputPortName(connection);
+        if (connectionIsBi) {
+            const sourcePortName = parseSourceOutputPortName(connection);
+            const bucket = ensureBiPortBucket(acc, inputPortName);
+            bucket.IN[connection.from] = sourceOutput;
+            const peerState = resolveBiState(sourcePortsOut, sourcePortName);
+            if (typeof peerState !== 'undefined') {
+                bucket.STATE[connection.from] = peerState;
+            }
+            return acc;
+        }
         if (!acc[inputPortName]) acc[inputPortName] = {};
         acc[inputPortName][connection.from] = sourceOutput;
         return acc;
     }, {});
+
+    if (Object.keys(resolvedContext).length === 0) return fallbackInput;
+    return resolvedContext;
 };
 
 export const shouldExecuteNodeInCurrentRun = (workflow: WorkflowDefinition, nodeId: string, outputsByNodeId: Map<string, Record<string, unknown>>): boolean => {

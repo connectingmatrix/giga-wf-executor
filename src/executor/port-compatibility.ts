@@ -16,6 +16,8 @@ interface ValidatedConnection {
     connectionName: string;
 }
 
+const BI_DIRECTIONAL_PORT_TYPE = 'bi-directional';
+
 const toRecord = (value: unknown): Record<string, unknown> => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
     return value as Record<string, unknown>;
@@ -98,13 +100,11 @@ export const validateWorkflowConnectionCompatibility = (workflow: WorkflowDefini
         const sourceSchema = getNodeSchema(workflow, sourceNode);
         const targetSchema = getNodeSchema(workflow, targetNode);
 
-        // Compatibility is schema-driven. If either side has no schema, keep legacy permissive behavior.
         if (!sourceSchema || !targetSchema) return;
 
         const sourcePorts = toPortRules(sourceSchema.outputs);
         const targetPorts = toPortRules(targetSchema.inputs);
 
-        // If either side has no declared ports, keep permissive behavior for backward compatibility.
         if (!Object.keys(sourcePorts).length || !Object.keys(targetPorts).length) return;
 
         const sourcePortName = parsePortName(connection.sourceHandle, Object.keys(sourcePorts)[0] ?? 'output');
@@ -116,6 +116,16 @@ export const validateWorkflowConnectionCompatibility = (workflow: WorkflowDefini
             violations.push({
                 connectionId: connection.id,
                 message: `Connection "${connectionName}" uses unknown port(s): out:${sourcePortName} -> in:${targetPortName}.`
+            });
+            return;
+        }
+
+        const sourceIsBi = sourceRule.portType === BI_DIRECTIONAL_PORT_TYPE;
+        const targetIsBi = targetRule.portType === BI_DIRECTIONAL_PORT_TYPE;
+        if (sourceIsBi !== targetIsBi) {
+            violations.push({
+                connectionId: connection.id,
+                message: `Connection "${connectionName}" must connect bi-directional ports to bi-directional ports only.`
             });
             return;
         }

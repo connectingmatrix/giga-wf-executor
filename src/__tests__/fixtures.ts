@@ -5,6 +5,64 @@ export const createWorkflow = (): WorkflowDefinition => ({
         id: 'wf_test',
         name: 'Workflow Test'
     },
+    nodeModels: {
+        start: {
+            id: 'start',
+            inputs: {
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            },
+            outputs: {
+                output: { allowMultipleArrows: true },
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            }
+        },
+        code: {
+            id: 'code',
+            inputs: {
+                input: { allowMultipleArrows: true },
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            },
+            outputs: {
+                output: { allowMultipleArrows: true },
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            }
+        },
+        metadata: {
+            id: 'metadata',
+            inputs: {
+                input: { allowMultipleArrows: true },
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            },
+            outputs: {
+                output: { allowMultipleArrows: true },
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            }
+        },
+        'if-else': {
+            id: 'if-else',
+            inputs: {
+                input: { allowMultipleArrows: true },
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            },
+            outputs: {
+                output: { allowMultipleArrows: true },
+                true: { allowMultipleArrows: true },
+                false: { allowMultipleArrows: true },
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            }
+        },
+        'respond-end': {
+            id: 'respond-end',
+            inputs: {
+                input: { allowMultipleArrows: true },
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            },
+            outputs: {
+                output: { allowMultipleArrows: true },
+                command: { portType: 'bi-directional', allowMultipleArrows: true }
+            }
+        }
+    },
     nodes: [],
     connections: []
 });

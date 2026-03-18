@@ -11,8 +11,11 @@ export interface WorkflowStepRunnerContext {
     adapters: WorkflowExecutorAdapters;
 }
 
+const BI_DIRECTIONAL_PORT_TYPE = 'bi-directional';
+
 const toPortsOut = (node: WorkflowNodeModel): Record<string, unknown> => (node.ports?.out && typeof node.ports.out === 'object' ? node.ports.out : {});
 const toPortsIn = (node: WorkflowNodeModel): Record<string, Record<string, unknown>> => (node.ports?.in && typeof node.ports.in === 'object' ? node.ports.in : {});
+const toRecord = (value: unknown): Record<string, unknown> => (value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
 const isNodeEnabled = (node: WorkflowNodeModel): boolean => (typeof node.runtime?.enabled === 'boolean' ? node.runtime.enabled : true);
 const toRuntimeError = (node: WorkflowNodeModel): string | null => {
     const runtime = node.runtime;
@@ -23,6 +26,88 @@ const toRuntimeError = (node: WorkflowNodeModel): string | null => {
 const normalizeNodeStatus = (node: WorkflowNodeModel, status: string): WorkflowNodeModel => {
     if (node.status === status && node.runtime?.status === status) return node;
     return { ...node, status: status as WorkflowNodeStatusEnum, runtime: { ...(node.runtime ?? {}), status } };
+};
+
+const getBiOutputPortIds = (workflow: WorkflowDefinition, node: WorkflowNodeModel): string[] => {
+    const schema = workflow.nodeModels?.[node.modelId];
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];
+    const outputs = (schema.outputs && typeof schema.outputs === 'object' && !Array.isArray(schema.outputs) ? schema.outputs : {}) as Record<string, { portType?: unknown }>;
+    return Object.entries(outputs)
+        .filter(([, rules]) => rules?.portType === BI_DIRECTIONAL_PORT_TYPE)
+        .map(([portId]) => portId);
+};
+
+const publishBiControlState = (workflow: WorkflowDefinition, node: WorkflowNodeModel): WorkflowNodeModel => {
+    const biOutputPortIds = getBiOutputPortIds(workflow, node);
+    if (biOutputPortIds.length === 0) return node;
+    const nextPortsOut = toRecord(node.ports?.out);
+    const controlState = {
+        nodeId: node.id,
+        nodeName: node.name,
+        modelId: node.modelId,
+        status: node.status,
+        runtime: toRecord(node.runtime),
+        output: nextPortsOut.output ?? null
+    };
+    biOutputPortIds.forEach((portId) => {
+        const existingPortValue = toRecord(nextPortsOut[portId]);
+        nextPortsOut[portId] = {
+            ...existingPortValue,
+            STATE: controlState
+        };
+    });
+    return {
+        ...node,
+        ports: {
+            in: toPortsIn(node),
+            out: nextPortsOut
+        }
+    };
+};
+
+const parsePortName = (handle: string | undefined, fallbackPort: string): string => {
+    if (!handle) return fallbackPort;
+    const [, parsedPort] = handle.split(':');
+    return parsedPort?.trim() ? parsedPort : fallbackPort;
+};
+
+const getOutputPortType = (workflow: WorkflowDefinition, nodeId: string, handle: string | undefined): string | undefined => {
+    const node = workflow.nodes.find((item) => item.id === nodeId);
+    if (!node) return undefined;
+    const schema = workflow.nodeModels?.[node.modelId];
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
+    const outputs = (schema.outputs && typeof schema.outputs === 'object' && !Array.isArray(schema.outputs) ? schema.outputs : {}) as Record<string, { portType?: unknown }>;
+    const fallbackPort = Object.keys(outputs)[0] ?? 'output';
+    const portName = parsePortName(handle, fallbackPort);
+    return outputs[portName]?.portType as string | undefined;
+};
+
+const getInputPortType = (workflow: WorkflowDefinition, nodeId: string, handle: string | undefined): string | undefined => {
+    const node = workflow.nodes.find((item) => item.id === nodeId);
+    if (!node) return undefined;
+    const schema = workflow.nodeModels?.[node.modelId];
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
+    const inputs = (schema.inputs && typeof schema.inputs === 'object' && !Array.isArray(schema.inputs) ? schema.inputs : {}) as Record<string, { portType?: unknown }>;
+    const fallbackPort = Object.keys(inputs)[0] ?? 'input';
+    const portName = parsePortName(handle, fallbackPort);
+    return inputs[portName]?.portType as string | undefined;
+};
+
+const isBiConnection = (workflow: WorkflowDefinition, connection: WorkflowDefinition['connections'][number]): boolean => {
+    const sourcePortType = getOutputPortType(workflow, connection.from, connection.sourceHandle);
+    const targetPortType = getInputPortType(workflow, connection.to, connection.targetHandle);
+    return sourcePortType === BI_DIRECTIONAL_PORT_TYPE && targetPortType === BI_DIRECTIONAL_PORT_TYPE;
+};
+
+const getBiPeerNodeIds = (workflow: WorkflowDefinition, nodeId: string): string[] => {
+    const peers = new Set<string>();
+    workflow.connections.forEach((connection) => {
+        if (!isBiConnection(workflow, connection)) return;
+        if (connection.from === nodeId) peers.add(connection.to);
+        if (connection.to === nodeId) peers.add(connection.from);
+    });
+    peers.delete(nodeId);
+    return [...peers];
 };
 
 const createEventCollector = (options: ExecuteNodeStepOptions): { events: WorkflowRunLogEvent[]; sink: WorkflowEventSink } => {
@@ -52,7 +137,7 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
         if (!targetNode) {
             throw new Error(`Node "${options.nodeId}" not found for step execution.`);
         }
-        const failedNode = buildFailedNodeState(targetNode, message);
+        const failedNode = publishBiControlState(workingWorkflow, buildFailedNodeState(targetNode, message));
         workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
         emitNodeFailed(sink, options.workflow.metadata.id, runId, options.nodeId, message);
         emitNodeLogs(sink, options.workflow.metadata.id, runId, options.nodeId, [message]);
@@ -70,14 +155,17 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
         const node = workingWorkflow.nodes.find((item) => item.id === targetNodeId);
         if (!node) throw new Error(`Node "${targetNodeId}" not found for step execution.`);
         if (!isNodeEnabled(node)) {
-            const disabledNode = { ...node, status: WorkflowNodeStatusEnum.Stopped, runtime: { ...(node.runtime ?? {}), status: WorkflowNodeStatusEnum.Stopped } };
+            const disabledNode = publishBiControlState(workingWorkflow, { ...node, status: WorkflowNodeStatusEnum.Stopped, runtime: { ...(node.runtime ?? {}), status: WorkflowNodeStatusEnum.Stopped } });
             workingWorkflow = replaceNodeById(workingWorkflow, disabledNode);
             return { node: disabledNode, result: { output: toPortsOut(node).output ?? null, status: WorkflowNodeStatusEnum.Stopped, logs: ['Node is disabled.'] } };
         }
 
         executionStack.add(targetNodeId);
         const runtimeOverrides = targetNodeId === options.nodeId ? options.overrides : nestedOverrides;
-        const runningNode = buildRunningNodeState(node, { runtime: { ...(node.runtime ?? {}), ...(runtimeOverrides?.runtime ?? {}), ...(runtimeOverrides?.properties ?? {}) } });
+        const runningNode = publishBiControlState(
+            workingWorkflow,
+            buildRunningNodeState(node, { runtime: { ...(node.runtime ?? {}), ...(runtimeOverrides?.runtime ?? {}), ...(runtimeOverrides?.properties ?? {}) } })
+        );
         workingWorkflow = replaceNodeById(workingWorkflow, runningNode);
         const input = overrideInput ?? buildNodeInputContext(workingWorkflow, targetNodeId, outputsByNode, toPortsIn(runningNode));
         emitNodeStarted(sink, options.workflow.metadata.id, runId, runningNode);
@@ -88,7 +176,7 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
         const variableResolution = resolveNodeRuntimeVariables(workingWorkflow, runningNode, input);
         if (!variableResolution.ok) {
             const message = formatVariableFailureMessage(variableResolution.failures, runningNode.name);
-            const failedNode = buildFailedNodeState(runningNode, message);
+            const failedNode = publishBiControlState(workingWorkflow, buildFailedNodeState(runningNode, message));
             workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
             outputsByNode.set(runningNode.id, toPortsOut(failedNode));
             emitNodeFailed(sink, options.workflow.metadata.id, runId, targetNodeId, message);
@@ -116,7 +204,7 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
                     workingWorkflow = remoteExecution.workflow;
                     (remoteExecution.events ?? []).forEach(options.onEvent ?? (() => undefined));
                     const status = resolveResultStatus(remoteExecution.result, remoteExecution.node.status as WorkflowNodeStatusEnum);
-                    const remoteNode = normalizeNodeStatus(remoteExecution.node, status);
+                    const remoteNode = publishBiControlState(workingWorkflow, normalizeNodeStatus(remoteExecution.node, status));
                     workingWorkflow = replaceNodeById(workingWorkflow, remoteNode);
                     outputsByNode.set(runningNode.id, toPortsOut(remoteNode));
 
@@ -131,7 +219,7 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
                             continue;
                         }
 
-                        const failedNode = buildFailedNodeState(remoteNode, message);
+                        const failedNode = publishBiControlState(workingWorkflow, buildFailedNodeState(remoteNode, message));
                         workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
                         outputsByNode.set(runningNode.id, toPortsOut(failedNode));
                         emitNodeFailed(sink, options.workflow.metadata.id, runId, targetNodeId, message);
@@ -168,7 +256,7 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
                         continue;
                     }
 
-                    const failedNode = buildFailedNodeState(runningNode, message);
+                    const failedNode = publishBiControlState(workingWorkflow, buildFailedNodeState(runningNode, message));
                     workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
                     outputsByNode.set(runningNode.id, toPortsOut(failedNode));
                     emitNodeFailed(sink, options.workflow.metadata.id, runId, targetNodeId, message);
@@ -178,7 +266,7 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
                 }
 
                 const normalizedResult = { ...result, status: status as WorkflowNodeStatusEnum };
-                const completedNode = buildCompletedNodeState(runningNode, input, normalizedResult);
+                const completedNode = publishBiControlState(workingWorkflow, buildCompletedNodeState(runningNode, input, normalizedResult));
                 workingWorkflow = replaceNodeById(workingWorkflow, completedNode);
                 outputsByNode.set(runningNode.id, toPortsOut(completedNode));
                 const durationMs = Number((performance.now() - startedAtMs).toFixed(2));
@@ -190,7 +278,7 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
             throw new Error('Failure mitigation loop exited unexpectedly.');
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Step execution failed.';
-            const failedNode = buildFailedNodeState(runningNode, message);
+            const failedNode = publishBiControlState(workingWorkflow, buildFailedNodeState(runningNode, message));
             workingWorkflow = replaceNodeById(workingWorkflow, failedNode);
             outputsByNode.set(runningNode.id, toPortsOut(failedNode));
             emitNodeFailed(sink, options.workflow.metadata.id, runId, targetNodeId, message);
@@ -202,5 +290,11 @@ export const executeNodeStepWithContext = async (runtime: WorkflowStepRunnerCont
     };
 
     const outcome = await executeNodeById(options.nodeId);
+    if (outcome.node.status !== WorkflowNodeStatusEnum.Failed) {
+        const peerNodeIds = getBiPeerNodeIds(workingWorkflow, options.nodeId);
+        for (const peerNodeId of peerNodeIds) {
+            await executeNodeById(peerNodeId);
+        }
+    }
     return { workflow: workingWorkflow, node: outcome.node, result: outcome.result, events };
 };
